@@ -37,6 +37,7 @@ DQ_SUITES = PROJECT_ROOT / "config" / "dq"
 # Installed on Glue next to the wheel (Glue 5.0 = Python 3.11); the versions installed locally.
 GLUE_PYPI_MODULES = ("psycopg[binary]==3.3.6", "PyYAML==6.0.3")
 FLEX_DPU_HOUR = 0.29  # ap-southeast-2, Glue 5.0 Flex (AWS Pricing API, 2026-10-09)
+GLUE_LOG_GROUPS = ("/aws-glue/jobs/error", "/aws-glue/jobs/logs-v2", "/aws-glue/jobs/output")
 SYNC_EXCLUDES = ("*.crc", "*/_staging/*", "*.DS_Store")
 
 
@@ -490,6 +491,13 @@ def cmd_down(ctx: Ctx, args) -> None:
             sm.delete_secret(SecretId=ctx.aws["secret_id"], ForceDeleteWithoutRecovery=True)
     except sm.exceptions.ResourceNotFoundException:
         pass
+    # Glue creates these log groups on first use, untagged; this account runs no other Glue jobs.
+    logs = ctx.client("logs")
+    for group in GLUE_LOG_GROUPS:
+        if logs.describe_log_groups(logGroupNamePrefix=group).get("logGroups"):
+            print(f"{'would delete' if dry else 'deleting'} log group {group}")
+            if not dry:
+                logs.delete_log_group(logGroupName=group)
     empty_bucket(ctx, dry)
     print(f"{'would delete' if dry else 'deleting'} stack {STACK} (bucket, workgroup, Glue database + tables)")
     if not dry:

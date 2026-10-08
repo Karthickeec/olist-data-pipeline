@@ -86,8 +86,8 @@ make aws-down                  # do it
 
 In order: pull the S3 lake back into `data/lake` (`sync --delete`, so local = S3), delete the Glue jobs
 (`olist-spark`, `olist-glue-test`) and their IAM roles (`olist-glue`, `olist-glue-test`), force-delete the
-secret (no recovery window), delete every object version and delete marker in the bucket, delete the
-CloudFormation stack (bucket, Athena workgroup, Glue database and its tables), then list what's still tagged
+secret (no recovery window), delete the log groups `/aws-glue/jobs/*` (Glue creates them untagged on first
+use), delete every object version and delete marker in the bucket, delete the CloudFormation stack (bucket, Athena workgroup, Glue database and its tables), then list what's still tagged
 `project=olist-pipeline` (must be nothing). The $5 budget is free and is kept unless deleted by hand
 (`aws budgets delete-budget --account-id … --budget-name olist-pipeline-5usd`).
 

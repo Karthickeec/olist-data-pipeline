@@ -466,6 +466,20 @@ appear in logs or config dumps.
 - Airflow stays local (MWAA costs about $0.49/h at minimum).
 
 ### Step 10: CI and project documentation
+
+- [x] **Done** (CI workflow committed locally; pushing it needs a GitHub token with the `workflow` scope).
+  - **Lint:** ruff (E, F, W, I, B, UP; 120 columns; py311 target), the code base formatted, `make lint`.
+  - **CI:** `.github/workflows/ci.yml` runs lint, then pytest with Java 17 and a postgres:16 service.
+    Simulated locally against an empty database without the Kaggle CSVs: 86 passed, 32 skipped (CSV-dependent
+    fixtures now skip). Locally with the data: 118 passed.
+  - **Docs:** docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/RUNBOOK.md; README CI badge, doc links and
+    Known limitations; no interview wording anywhere.
+  - **AWS teardown run:**
+    - The lake was pulled back (4,511 files; `verify-gold` passes locally).
+    - Deleted: Glue jobs and roles, the secret, 12,421 object versions, the stack, the Glue log groups.
+    - 0 resources tagged `project=olist-pipeline` remain; the free $5 budget is kept.
+    - AWS spend: Glue $0.41 (13 runs), plus S3/Athena/Secrets Manager requests and storage measured in cents.
+      All of it is covered by the Free-plan credits (balance $120).
 - **GitHub Actions:**
   - `ruff check` + `ruff format --check`;
   - `pytest` with Java 17 (`setup-java`) and a `postgres:16` service container for integration tests;
