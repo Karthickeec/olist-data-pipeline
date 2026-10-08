@@ -3,6 +3,7 @@ data/
 
 # Python
 .venv/
+.venv-airflow/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -13,3 +14,8 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Airflow (only the DAGs are versioned)
+airflow/*
+!airflow/dags/
+airflow/dags/__pycache__/

@@ -5,9 +5,16 @@ API_PORT ?= 8000
 # Local-only default for the mock API; override in the environment (Secrets Manager later).
 OLIST_API_KEY ?= dev-local-key
 export OLIST_API_KEY
+# Airflow runs from its own venv; its state lives in ./airflow (gitignored except airflow/dags).
+AIRFLOW := .venv-airflow/bin/airflow
+export AIRFLOW_HOME := $(CURDIR)/airflow
+export AIRFLOW__CORE__EXECUTOR := LocalExecutor
+export AIRFLOW__CORE__LOAD_EXAMPLES := False
+export AIRFLOW__CORE__DAGS_FOLDER := $(CURDIR)/airflow/dags
+export AIRFLOW__CORE__PARALLELISM := 4
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
-        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
+        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo airflow-venv airflow-setup airflow airflow-stop backfill verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
 
 help:  ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -110,6 +117,26 @@ verify-gold-idempotency:  ## Rerun Gold for DATE and check nothing changes
 
 salting-demo:  ## Skewed aggregation by customer_state with and without salting -> docs/SALTING.md
 	$(PY) scripts/salting_demo.py
+
+airflow-venv:  ## Create .venv-airflow with Airflow 3.3.2 (official constraints file)
+	$(UV) venv --python 3.12 .venv-airflow
+	$(UV) pip install --python .venv-airflow/bin/python "apache-airflow==3.3.2" \
+		--constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt
+
+airflow-setup:  ## Migrate the Airflow DB (SQLite) and create the 1-slot spark pool
+	$(AIRFLOW) db migrate
+	$(AIRFLOW) pools set spark 1 "one Spark JVM at a time (8 GB laptop)"
+
+airflow:  ## Start Airflow standalone in the background (UI http://localhost:8080, log airflow/standalone.log)
+	@PATH="$(CURDIR)/.venv-airflow/bin:$$PATH" nohup airflow standalone > airflow/standalone.log 2>&1 & echo $$! > airflow/standalone.pid
+	@echo "Airflow starting (pid $$(cat airflow/standalone.pid)); admin password in airflow/simple_auth_manager_passwords.json.generated"
+
+airflow-stop:  ## Stop Airflow standalone
+	@-pkill -f "airflow standalone" ; pkill -f "airflow (scheduler|api-server|dag-processor|triggerer)" ; rm -f airflow/standalone.pid; echo "Airflow stopped"
+
+backfill:  ## (Re)run days: make backfill START=2018-01-03 END=2018-01-03 [REPROCESS=completed] (Airflow running, DAG unpaused)
+	$(AIRFLOW) backfill create --dag-id olist_daily --from-date $(START) --to-date $(END) --max-active-runs 1 \
+		--reprocess-behavior $(or $(REPROCESS),none)
 
 test:  ## All tests (integration tests skip if Postgres is down)
 	$(PY) -m pytest -q

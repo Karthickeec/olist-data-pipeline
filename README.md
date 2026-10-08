@@ -3,7 +3,7 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
 
-**Status: step 6 done (Gold + salting demo). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
+**Status: steps 1–7 done locally (sources, Bronze, Silver, DQ, Gold, Airflow). Steps 8–10 (AWS, CI) are planned in [docs/PLAN.md](docs/PLAN.md).**
 
 | Source | What it simulates | Where |
 |---|---|---|
@@ -43,6 +43,14 @@ make dq LAYER=silver DATE=2017-03-06   # data-quality checks (also part of make 
 make gold DATE=2017-12-31         # Silver -> Gold (star schema, metrics)
 make verify-gold DATE=2017-12-31  # totals, SCD2 invariants, LTV
 make salting-demo                 # skew experiment -> docs/SALTING.md
+
+# Airflow (own venv, SQLite + LocalExecutor, ~1.1 GB RAM)
+make airflow-venv airflow-setup   # once: Airflow 3.3.2 + the 1-slot spark pool
+make api                          # in a second terminal (the DAG's api_up sensor waits for it)
+make airflow                      # standalone in the background, UI on http://localhost:8080
+OLIST_DAG_END_DATE=2018-01-05 make airflow   # bound the catch-up, then unpause olist_daily
+make backfill START=2018-01-03 END=2018-01-03 REPROCESS=completed
+make airflow-stop
 make verify-bronze            # Bronze vs Postgres and landing files
 ```
 
@@ -348,10 +356,60 @@ Verified (`make verify-gold DATE=2017-12-31`):
 - **AQE's skew-join handling** splits it with no code change: 25 tasks, the busiest at 522k rows.
 - **Gotcha:** AQE only does this when *both* join sides are shuffled. My first attempt used a small side that was already hash-partitioned on the key, and AQE silently did nothing.
 
+## Airflow (step 7)
+
+One DAG, `olist_daily` ([`airflow/dags/olist_daily.py`](airflow/dags/olist_daily.py)), runs a business day end to end:
+
+```
+api_up (sensor) ─┐
+replay ──────────┴─> [bronze_postgres, bronze_files, bronze_api] -> dq_bronze -> silver -> dq_silver -> gold -> dq_gold
+```
+
+- **Light setup for 8 GB:**
+  - Airflow 3.3.2 (`airflow standalone`) in its own `.venv-airflow`, installed with the official constraints file.
+  - SQLite metadata with the LocalExecutor (Airflow 3 accepts the combination), so there are no extra containers.
+  - About 1.1 GB RSS across 11 processes.
+  - Tasks are BashOperators that run the project's own `.venv`, so Airflow's dependencies never mix with PySpark or FastAPI.
+- **One Spark JVM at a time:** every Spark task uses the pool `spark`, which has 1 slot. The three Bronze tasks are parallel in the graph but run one after another.
+- **`max_active_runs=1`:** each day depends on the previous day's source state and watermarks.
+- **Retries:** 2, with exponential backoff (1 min base, 10 min cap). The API task's own HTTP retries come first.
+- **`api_up`:** a sensor in reschedule mode that checks `/healthz` every 30 s for up to 10 min without holding a worker slot.
+  Note that Airflow never retries a sensor that times out.
+- **Callbacks:** `on_retry` / `on_failure` callbacks log one clear block with the DAG, task, run date, try number, error and log location.
+- **Catch-up and backfill:** `catchup=True` from 2018-01-01, with an `end_date` (default 2018-10-17, the end of the history;
+  `OLIST_DAG_END_DATE` overrides it). Airflow 3 schedules no task of a paused DAG, backfill runs included (I checked the
+  scheduler source), so the DAG is created paused and *unpausing it is the catch-up*. `make backfill` reruns chosen days.
+
+Verified:
+- **Catch-up:** with `OLIST_DAG_END_DATE=2018-01-05`, unpausing ran 2018-01-01..05 in order, one at a time; all 5 succeeded
+  (2:19–2:31 each), and no run for 01-06 was created.
+- **Backfill:** `make backfill START=2018-01-03 END=2018-01-03 REPROCESS=completed` reprocessed that run in place
+  (`run_type=backfill`, all 10 tasks on try 2) and it succeeded in 2:23.
+- **Failure demo** ([`scripts/airflow_failure_demo.sh`](scripts/airflow_failure_demo.sh), 2018-01-06), with Postgres and the API stopped:
+  - `replay` failed (connection refused), logged the retry block, retried after about 30 s once Postgres was back, and succeeded on try 2.
+  - `api_up` checked three times, 30 s apart, and timed out after 62.5 s (demo timeout 60 s); the failure block was logged.
+  - All downstream tasks became `upstream_failed` and the run failed.
+  - After starting the API and clearing `api_up` and its downstream tasks, the run succeeded (2:17).
+  - The two blocks from the task logs:
+  ```
+  OLIST PIPELINE TASK WILL BE RETRIED
+    task:       replay
+    try:        1 of 3
+    error:      AirflowException: Bash command failed. The command returned a non-zero exit code 1.
+  OLIST PIPELINE TASK FAILED (no retries left)
+    task:       api_up
+    try:        1 of 3
+    error:      AirflowSensorTimeout: Sensor has timed out; run duration of 62.518907 seconds exceeds the specified timeout of 60.0.
+  ```
+- **Results of the Airflow-run days:** `verify-bronze`, `verify-silver` and `verify-gold` pass through 2018-01-06:
+  46,617 orders and 52,575 order lines; 154 Silver table-batches balance; LTV equals fact payments for 44,458 customers.
+  DQ found 0 blocking failures over 18 layer-days.
+
 ## Layout
 
 ```
 docs/                    PLAN.md, SALTING.md
+airflow/dags/            olist_daily DAG (the rest of airflow/ is local state, gitignored)
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
 config/dq/                data-quality suites per layer
 sql/001_schema.sql       source schema (idempotent DDL)
@@ -365,7 +423,7 @@ src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rul
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
                          api_to_bronze.py, silver.py, gold.py, dq.py, salting_demo.py,
-                         verify_bronze.py, verify_silver.py, verify_gold.py,
+                         verify_bronze.py, verify_silver.py, verify_gold.py, airflow_failure_demo.sh,
                          reset_source.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

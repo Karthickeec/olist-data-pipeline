@@ -226,6 +226,17 @@ Trade-off, documented: the catch-up batch keeps only the latest state of each or
 
 ## Step 7: Airflow locally
 
+- [x] **Done.**
+  - **Setup:** Airflow 3.3.2 standalone in `.venv-airflow` with SQLite + LocalExecutor (~1.1 GB RSS).
+  - **Catch-up:** 5 days (2018-01-01..05) all succeeded in order, 2:19–2:31 per run.
+  - **Backfill:** reran 2018-01-03 in place (all tasks on try 2) and it succeeded.
+  - **Failure demo, 2018-01-06:** `replay` retried and recovered after a Postgres outage; `api_up` timed out after 62.5 s with the failure block logged; after a clear, the run succeeded in 2:17.
+  - **Checks:** `verify-bronze`, `verify-silver` and `verify-gold` pass through 2018-01-06; 0 blocking DQ failures over 18 layer-days.
+  - **Tests:** 105.
+  - **Changed from the plan:**
+    - Airflow 3 schedules no task of a paused DAG (backfill runs included), so the DAG has an `end_date` (`OLIST_DAG_END_DATE`) and unpausing performs the catch-up.
+    - Sensors don't retry on timeout, so the demo shows the retry on `replay` (a Postgres outage) and the timeout on `api_up` (an API outage).
+
 **Goal:** one daily DAG that runs the whole pipeline with retries, catch-up/backfill and clear failure logs,
 light enough for 8 GB.
 
