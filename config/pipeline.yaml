@@ -29,3 +29,17 @@ spark:
   java_home: ~/.local/share/jdk-17/Contents/Home  # installed by scripts/install_java.sh
   jdbc_package: org.postgresql:postgresql:42.7.7
   jdbc_fetchsize: 10000
+
+api:
+  base_url: http://127.0.0.1:8000
+  key_env: OLIST_API_KEY      # env var holding the API key (server and client); Secrets Manager later
+  page_size: 200
+  timeout_seconds: 10
+  max_attempts: 5             # per request, then the run fails
+  backoff_base_seconds: 0.5   # 0.5, 1, 2, 4 ... (x 0.5-1.0 jitter), unless Retry-After says otherwise
+  backoff_max_seconds: 30
+  server:                     # failure injection in the mock service
+    rate_limit_rate: 0.03     # 429 with Retry-After
+    error_rate: 0.02          # 500
+    retry_after_seconds: 1
+    dirty_rate: 0.01          # malformed records

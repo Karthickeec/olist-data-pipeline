@@ -3,12 +3,13 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
 
-**Status: step 2 done. Step 1: simulated source systems. Step 2: Bronze ingestion with PySpark.**
+**Status: step 3 done. Step 1: simulated source systems. Step 2: Bronze ingestion with PySpark. Step 3: REST API source and api_to_bronze.**
 
 | Source | What it simulates | Where |
 |---|---|---|
 | Postgres `olist` schema | the shop's OLTP database, filled one day at a time | `docker compose` service `postgres` |
 | Address-change requests | a CRM portal dropping daily JSONL files (some deliberately dirty) | `data/landing/customer_changes/dt=YYYY-MM-DD/changes.jsonl` |
+| Customer-activity REST API | a paginated, rate-limited, sometimes failing web service (FastAPI mock) | `make api` → `http://127.0.0.1:8000/v1/customer-activity` |
 
 ## Quick start
 
@@ -32,7 +33,9 @@ make spark-smoke              # Spark + Parquet + JDBC sanity check
 make reset-source             # empty transactional tables, pipeline state, landing, lake
 make replay-range START=2016-09-04 END=2017-02-28
 make bronze DATE=2017-02-28   # first run = initial load
-make daily DATE=2017-03-01    # replay one day into the source, then ingest it
+make api                      # in a second terminal: the mock customer-activity API
+make daily DATE=2017-03-01    # replay one day, then Postgres, files and API into Bronze
+make bronze-api DATE=2017-03-01
 make verify-bronze            # Bronze vs Postgres and landing files
 ```
 
@@ -138,6 +141,44 @@ For a daily batch pipeline over an OLTP source that only updates in place, the q
 the pragmatic choice. When full change history, deletes or replayable reruns matter, log-based CDC is
 the right tool.
 
+## REST API source and api_to_bronze (step 3)
+
+**The service** (`src/olist_pipeline/api/`, FastAPI, run with uvicorn from the venv):
+`GET /v1/customer-activity?date=YYYY-MM-DD&page=N&page_size=M` returns paged daily activity per
+`customer_unique_id`: `sessions`, `page_views`, `cart_adds`, `support_tickets`, `last_seen_at`, `device`.
+
+- **Who appears:** only customers who had ordered by that date. A customer is active with 15% probability in
+  the week after an order, 2% within 30 days, and 0.1% otherwise. That gives a median of 377 records a day
+  from mid-2017 (range 162–505) and a handful a day in 2016.
+- **Deterministic:** everything is seeded by sha256(date, customer), so a date always returns the
+  same records, whatever the paging. Records are sorted by id, so pages are stable.
+- **Auth:** the `X-API-Key` header is compared in constant time against `$OLIST_API_KEY`. Missing or wrong → 401.
+  The server refuses to start without a key. The Makefile uses a local-only default (`dev-local-key`); the
+  key moves to AWS Secrets Manager later.
+- **Failure injection** (`api.server` in `pipeline.yaml`, on by default): 3% of requests → 429 with
+  `Retry-After`, 2% → 500, and 1% of records are malformed (missing field, negative `sessions`,
+  `last_seen_at` as `dd/mm/yyyy HH:MM:SS`). Failures never change a page's content.
+
+**The job** (`api_to_bronze --date D`):
+1. Pages through the API with httpx. 429, 5xx, timeouts and connection errors are retried: the client waits
+   for `Retry-After` when the server sends it, and otherwise uses exponential backoff with jitter (0.5 s × 2ⁿ, capped at 30 s).
+   The run fails after 5 attempts at the same request. 401 and other 4xx errors fail immediately. Every
+   retry is logged with status, attempt and wait. The record total across pages must match `total_records`.
+2. Lands each raw response body in `data/landing/customer_activity/dt=D/page_NNNN.json`. The folder is
+   built next to the old one and swapped in only once every page is on disk. A failed run leaves the
+   previous landing intact, and a rerun with fewer pages leaves no stale pages.
+3. Spark reads the pages (`multiLine`, permissive, record fields as strings) into
+   `bronze/api/customer_activity/ingest_date=D/`, one row per record, plus `_page`, `_source_file`,
+   `_corrupt_record` and the usual metadata. A page that is not valid JSON is kept as one row with
+   `_corrupt_record`.
+4. Prints a summary line, e.g. `api_to_bronze 2017-03-05: pages=20 records=97 retries=1 total_wait=1.0s bronze_rows=97`.
+
+Example retry from a real run:
+`WARNING retry 2017-03-05 page 19: HTTP 429 on attempt 1/5, waiting 1.00s (Retry-After)`
+
+Because the API is a pure function of the date, reruns are always identical: the same landing bytes
+and the same Bronze rows apart from `_ingested_at`, even when different requests failed and were retried.
+
 ## Layout
 
 ```
@@ -146,9 +187,10 @@ sql/001_schema.sql       source schema (idempotent DDL)
 sql/pipeline/            watermarks, ingest_runs, reference_snapshots
 src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rules),
                          replay, customer_changes, seed, verify,
-                         spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze)
+                         spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
+                         api_to_bronze), api/ (activity, app, server, client)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
-                         verify_bronze.py, reset_source.py
+                         api_to_bronze.py, verify_bronze.py, reset_source.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

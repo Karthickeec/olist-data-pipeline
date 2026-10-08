@@ -1,8 +1,13 @@
 PY  := .venv/bin/python
 UV  ?= $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
+API_HOST ?= 127.0.0.1
+API_PORT ?= 8000
+# Local-only default for the mock API; override in the environment (Secrets Manager later).
+OLIST_API_KEY ?= dev-local-key
+export OLIST_API_KEY
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
-        spark-smoke bronze bronze-postgres bronze-files daily verify-bronze test test-unit reset-source reset
+        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health daily verify-bronze test test-unit reset-source reset
 
 help:  ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -52,9 +57,21 @@ bronze-files:  ## Landing files -> Bronze for one batch date: make bronze-files 
 
 bronze: bronze-postgres bronze-files  ## Both Bronze jobs: make bronze DATE=2017-03-01
 
-daily:  ## One simulated day: replay DATE into the source, then ingest it into Bronze
+api:  ## Run the mock customer-activity API (foreground; use a second terminal)
+	$(PY) -m uvicorn olist_pipeline.api.server:app_from_config --factory \
+		--host $(API_HOST) --port $(API_PORT) --workers 1
+
+api-health:  ## Fail unless the mock API is up
+	@curl -fsS http://$(API_HOST):$(API_PORT)/healthz >/dev/null 2>&1 || \
+		{ echo "Customer-activity API is not running: start it with 'make api' in another terminal."; exit 1; }
+
+bronze-api:  ## API -> landing -> Bronze for one batch date: make bronze-api DATE=2017-03-01
+	$(PY) scripts/api_to_bronze.py --date $(DATE)
+
+daily: api-health  ## One simulated day: replay DATE, then Postgres, files and API into Bronze
 	$(MAKE) replay DATE=$(DATE)
 	$(MAKE) bronze DATE=$(DATE)
+	$(MAKE) bronze-api DATE=$(DATE)
 
 verify-bronze:  ## Check Bronze partitions and contents against Postgres and the landing files
 	$(PY) scripts/verify_bronze.py

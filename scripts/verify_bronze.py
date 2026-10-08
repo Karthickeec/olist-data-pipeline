@@ -4,12 +4,17 @@
   * latest version per key across all partitions == Postgres rows up to the watermark
   * the latest reference snapshot == the current Postgres table
   * every customer_changes partition holds as many rows as its landing file has lines
+  * every customer_activity partition holds the total_records the API reported
 """
+import json
 import sys
+from datetime import date
 
 from pyspark.sql import Window as W
 from pyspark.sql import functions as F
 
+from olist_pipeline.api.client import landing_dir_for
+from olist_pipeline.bronze.api_to_bronze import SOURCE as API_SOURCE, TABLE as API_TABLE
 from olist_pipeline.bronze.files_to_bronze import SOURCE as FILES_SOURCE, TABLE as FILES_TABLE
 from olist_pipeline.bronze.postgres_to_bronze import SOURCE
 from olist_pipeline.config import load_config
@@ -85,6 +90,16 @@ def main() -> None:
                if n != len((partition_dir(cfg["paths"]["landing_dir"], d) / "changes.jsonl")
                            .read_text().splitlines())]
         report(FILES_TABLE, not bad, f"{len(counts)} partitions, {sum(counts.values())} rows"
+               + (f", wrong: {bad}" if bad else ""))
+
+        api_root = cfg["paths"]["landing_dir"] / "customer_activity"
+        expected = {
+            d: json.loads((landing_dir_for(cfg["paths"]["landing_dir"], d) / "page_0001.json").read_text())["total_records"]
+            for d in (date.fromisoformat(p.name[3:]) for p in api_root.glob("dt=*"))
+        } if api_root.is_dir() else {}
+        counts = partition_counts(spark, table_path(root, "bronze", API_SOURCE, API_TABLE)) if expected else {}
+        bad = sorted(d for d in expected.keys() | counts.keys() if counts.get(d, 0) != expected.get(d))
+        report(API_TABLE, not bad, f"{len(counts)} partitions, {sum(counts.values())} rows"
                + (f", wrong: {bad}" if bad else ""))
     finally:
         spark.stop()

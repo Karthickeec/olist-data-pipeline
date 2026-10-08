@@ -1,4 +1,7 @@
 psycopg[binary]>=3.2,<4
 PyYAML>=6.0,<7
 pyspark==3.5.9
+fastapi==0.141.1
+uvicorn==0.53.0
+httpx==0.28.1
 pytest>=8,<9
