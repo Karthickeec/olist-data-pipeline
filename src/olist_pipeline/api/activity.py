@@ -3,6 +3,7 @@
 Everything is seeded by (day, customer_unique_id) through sha256, so the same
 date always yields the same records regardless of process, order or paging.
 """
+
 import hashlib
 import random
 from bisect import bisect_right
@@ -13,7 +14,7 @@ from pathlib import Path
 from olist_pipeline.sources import read_table
 
 # Chance that a customer is active on a day, by days since their latest order.
-RECENT_ACTIVITY = ((7, 0.15), (30, 0.02))   # (age below N days, probability)
+RECENT_ACTIVITY = ((7, 0.15), (30, 0.02))  # (age below N days, probability)
 BASELINE_ACTIVITY = 0.001
 DEVICES = ("web", "android", "ios")
 DEVICE_WEIGHTS = (50, 35, 15)
@@ -24,6 +25,7 @@ DROPPABLE_FIELDS = ("page_views", "device", "last_seen_at")
 @dataclass
 class CustomerIndex:
     """customer_unique_id -> sorted purchase days. Small enough to keep in memory (~96k ids)."""
+
     ids: list[str]
     order_days: dict[str, list[date]]
 

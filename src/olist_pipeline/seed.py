@@ -2,6 +2,7 @@
 
 Never truncates; order_items references products and sellers.
 """
+
 from pathlib import Path
 
 import psycopg
@@ -22,13 +23,16 @@ def seed_table(conn: psycopg.Connection, raw_dir: Path, name: str) -> tuple[int,
         with cur.copy(sql.SQL("COPY {} ({}) FROM STDIN").format(stage, cols)) as copy:
             for row in rows:
                 copy.write_row([row[c] for c in table.column_names])
-        cur.execute(sql.SQL(
-            "INSERT INTO {target} ({cols}) SELECT {cols} FROM {stage} ON CONFLICT DO NOTHING"
-        ).format(target=target, cols=cols, stage=stage))
+        cur.execute(
+            sql.SQL("INSERT INTO {target} ({cols}) SELECT {cols} FROM {stage} ON CONFLICT DO NOTHING").format(
+                target=target, cols=cols, stage=stage
+            )
+        )
         inserted = cur.rowcount
     return len(rows), inserted
 
 
-def seed_reference(conn: psycopg.Connection, raw_dir: Path,
-                   tables: tuple[str, ...] = REFERENCE_TABLES) -> dict[str, tuple[int, int]]:
+def seed_reference(
+    conn: psycopg.Connection, raw_dir: Path, tables: tuple[str, ...] = REFERENCE_TABLES
+) -> dict[str, tuple[int, int]]:
     return {name: seed_table(conn, raw_dir, name) for name in tables}

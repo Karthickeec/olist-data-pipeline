@@ -1,10 +1,11 @@
 """Verify Silver.
 
-  full                  Silver vs Postgres, row accounting, geolocation, order_lines totals, and
-                        quarantine counts vs the dirty records counted straight from the landing files
-  idempotency --date D  rerun Silver for D; every Silver table, quarantine and pending area must be
-                        unchanged apart from processing-time columns
+full                  Silver vs Postgres, row accounting, geolocation, order_lines totals, and
+                      quarantine counts vs the dirty records counted straight from the landing files
+idempotency --date D  rerun Silver for D; every Silver table, quarantine and pending area must be
+                      unchanged apart from processing-time columns
 """
+
 import argparse
 import json
 import sys
@@ -48,39 +49,55 @@ def check_full(spark, cfg, conn, report: Report) -> None:
         cols = list(TABLES[table].column_names) + ["updated_at"]
         wm = book.watermark("olist_postgres", table)
         silver = spark.read.parquet(silver_dir(root, table)).select(cols)
-        source = read_jdbc(spark, cfg, query=f"SELECT * FROM \"{schema}\".\"{table}\" "
-                                             f"WHERE updated_at <= TIMESTAMP '{wm}'").select(cols)
+        source = read_jdbc(
+            spark, cfg, query=f'SELECT * FROM "{schema}"."{table}" WHERE updated_at <= TIMESTAMP \'{wm}\''
+        ).select(cols)
         report(f"{table} == Postgres", same(silver, source), f"{silver.count()} rows (<= {wm})")
 
     bad = conn.execute(
         f"SELECT table_name, batch_date FROM {pipeline}.layer_runs WHERE layer = 'silver' "
-        "AND rows_in <> rows_valid + rows_quarantined + rows_duplicate + rows_pending").fetchall()
+        "AND rows_in <> rows_valid + rows_quarantined + rows_duplicate + rows_pending"
+    ).fetchall()
     n_runs = conn.execute(f"SELECT count(*) FROM {pipeline}.layer_runs WHERE layer = 'silver'").fetchone()[0]
     report("row accounting (in = valid+quar+dup+pending)", not bad, f"{n_runs} table-batches checked {bad or ''}")
 
     zips = conn.execute(f'SELECT count(DISTINCT geolocation_zip_code_prefix) FROM "{schema}".geolocation').fetchone()[0]
     geo = spark.read.parquet(silver_dir(root, "geolocation"))
-    report("geolocation one row per zip prefix", geo.count() == zips == geo.select("zip_code_prefix").distinct().count(),
-           f"{geo.count()} rows, {zips} prefixes in source")
+    report(
+        "geolocation one row per zip prefix",
+        geo.count() == zips == geo.select("zip_code_prefix").distinct().count(),
+        f"{geo.count()} rows, {zips} prefixes in source",
+    )
 
     lines = spark.read.parquet(silver_dir(root, "order_lines"))
     items = spark.read.parquet(silver_dir(root, "order_items"))
-    report("order_lines: one line per item", lines.count() == items.count(),
-           f"{lines.count()} lines, {items.count()} items")
-    per_order = (lines.filter(F.col("payment_total").isNotNull()).groupBy("order_id")
-                 .agg(F.sum("allocated_payment").alias("alloc"), F.first("payment_total").alias("total")))
+    report(
+        "order_lines: one line per item",
+        lines.count() == items.count(),
+        f"{lines.count()} lines, {items.count()} items",
+    )
+    per_order = (
+        lines.filter(F.col("payment_total").isNotNull())
+        .groupBy("order_id")
+        .agg(F.sum("allocated_payment").alias("alloc"), F.first("payment_total").alias("total"))
+    )
     off = per_order.filter(F.col("alloc") != F.col("total")).count()
-    report("order_lines: allocated payments sum to total", off == 0,
-           f"{per_order.count()} orders, {off} off by any amount")
-    untranslated = spark.read.parquet(silver_dir(root, "products")).filter(
-        F.col("product_category_name_english").isNull()).count()
+    report(
+        "order_lines: allocated payments sum to total", off == 0, f"{per_order.count()} orders, {off} off by any amount"
+    )
+    untranslated = (
+        spark.read.parquet(silver_dir(root, "products")).filter(F.col("product_category_name_english").isNull()).count()
+    )
     report("products: every category has English", untranslated == 0, f"{untranslated} without")
 
     check_quarantine_vs_landing(spark, cfg, conn, report)
 
     last = conn.execute(f"SELECT max(batch_date) FROM {pipeline}.layer_runs WHERE layer = 'silver'").fetchone()[0]
-    waiting = sum(lake_fingerprint(spark, f"{pending_dir(root, t)}/batch_date={last}", set())[0]
-                  for t in PG_TABLES if path_exists(spark, f"{pending_dir(root, t)}/batch_date={last}"))
+    waiting = sum(
+        lake_fingerprint(spark, f"{pending_dir(root, t)}/batch_date={last}", set())[0]
+        for t in PG_TABLES
+        if path_exists(spark, f"{pending_dir(root, t)}/batch_date={last}")
+    )
     report("late-arriving rows still pending", True, f"{waiting} after batch {last}")
 
 
@@ -112,7 +129,7 @@ def check_quarantine_vs_landing(spark, cfg, conn, report: Report) -> None:
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
-            changes[r["change_id"]] = r                         # exact duplicates collapse
+            changes[r["change_id"]] = r  # exact duplicates collapse
     for r in changes.values():
         state = (r["new_state"] or "").strip().upper()
         if state not in BRAZIL_STATES and state not in names:
@@ -124,11 +141,15 @@ def check_quarantine_vs_landing(spark, cfg, conn, report: Report) -> None:
         else:
             fixed_states += state != r["new_state"]
     got = quarantine_reasons(spark, root, "customer_changes")
-    report("customer_changes quarantine == landing dirt", got == expected, f"expected {dict(expected)}, got {dict(got)}")
+    report(
+        "customer_changes quarantine == landing dirt", got == expected, f"expected {dict(expected)}, got {dict(got)}"
+    )
     silver_changes = spark.read.parquet(silver_dir(root, "customer_changes")).count()
-    report("customer_changes: unique ids - quarantined = Silver",
-           len(changes) - sum(expected.values()) == silver_changes,
-           f"{len(changes)} unique change ids, {silver_changes} in Silver, {fixed_states} states normalised")
+    report(
+        "customer_changes: unique ids - quarantined = Silver",
+        len(changes) - sum(expected.values()) == silver_changes,
+        f"{len(changes)} unique change ids, {silver_changes} in Silver, {fixed_states} states normalised",
+    )
 
     expected, records, reformatted = Counter(), 0, 0
     days = ingested("api", "customer_activity")
@@ -144,11 +165,16 @@ def check_quarantine_vs_landing(spark, cfg, conn, report: Report) -> None:
             elif "/" in (r.get("last_seen_at") or ""):
                 reformatted += 1
     got = quarantine_reasons(spark, root, "customer_activity")
-    report("customer_activity quarantine == landing dirt", got == expected, f"expected {dict(expected)}, got {dict(got)}")
+    report(
+        "customer_activity quarantine == landing dirt", got == expected, f"expected {dict(expected)}, got {dict(got)}"
+    )
     silver_activity = spark.read.parquet(silver_dir(root, "customer_activity"))
     parsed = silver_activity.filter(F.col("_timestamp_reformatted") & F.col("last_seen_at").isNotNull()).count()
-    report("customer_activity: Brazilian timestamps parsed", parsed == reformatted,
-           f"{reformatted} in landing, {parsed} parsed in Silver; {records} records, {silver_activity.count()} in Silver")
+    report(
+        "customer_activity: Brazilian timestamps parsed",
+        parsed == reformatted,
+        f"{reformatted} in landing, {parsed} parsed in Silver; {records} records, {silver_activity.count()} in Silver",
+    )
 
 
 def check_idempotency(spark, cfg, conn, day: date, report: Report) -> None:
@@ -158,7 +184,9 @@ def check_idempotency(spark, cfg, conn, day: date, report: Report) -> None:
     after = silver_snapshot(spark, root)
     for k in before:
         if before[k] is not None or after[k] is not None:
-            report(k, before[k] == after[k], f"rows {before[k][0] if before[k] else 0} -> {after[k][0] if after[k] else 0}")
+            report(
+                k, before[k] == after[k], f"rows {before[k][0] if before[k] else 0} -> {after[k][0] if after[k] else 0}"
+            )
 
 
 def main() -> None:

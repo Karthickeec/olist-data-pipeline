@@ -3,6 +3,7 @@
 Every line is kept, dirty or not. Fields are read as strings exactly as sent;
 lines that are not valid JSON land in _corrupt_record with the other fields null.
 """
+
 from datetime import date, datetime
 
 from pyspark.sql import SparkSession
@@ -18,13 +19,11 @@ from olist_pipeline.spark import build_spark
 SOURCE = "crm"
 TABLE = "customer_changes"
 CORRUPT = "_corrupt_record"
-FIELDS = ("change_id", "customer_unique_id", "new_zip_code_prefix", "new_city",
-          "new_state", "requested_at", "source")
+FIELDS = ("change_id", "customer_unique_id", "new_zip_code_prefix", "new_city", "new_state", "requested_at", "source")
 SCHEMA = StructType([StructField(f, StringType()) for f in FIELDS + (CORRUPT,)])
 
 
-def ingest_customer_changes(spark: SparkSession, cfg: dict, batch_date: date,
-                            ingested_at: datetime) -> TableResult:
+def ingest_customer_changes(spark: SparkSession, cfg: dict, batch_date: date, ingested_at: datetime) -> TableResult:
     src = partition_dir(cfg["paths"]["landing_dir"], batch_date)
     if not src.is_dir():
         raise FileNotFoundError(f"no landing partition for {batch_date}: {src}")

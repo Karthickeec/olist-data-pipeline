@@ -1,4 +1,5 @@
 """Load and validate a DQ suite (config/dq/<layer>.yaml)."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,8 +21,20 @@ REQUIRED = {
     "relationship": ("column", "ref"),
     "expression": ("expr",),
 }
-OPTIONAL = {"name", "severity", "scope", "where", "min", "max", "min_ratio", "max_ratio", "allow_null",
-            "allow_extra", "ref_where", "description"}
+OPTIONAL = {
+    "name",
+    "severity",
+    "scope",
+    "where",
+    "min",
+    "max",
+    "min_ratio",
+    "max_ratio",
+    "allow_null",
+    "allow_extra",
+    "ref_where",
+    "description",
+}
 
 
 class DQConfigError(ValueError):
@@ -45,7 +58,7 @@ class Check:
 
 @dataclass(frozen=True)
 class TableChecks:
-    name: str                       # e.g. silver.orders, bronze.olist_postgres.orders
+    name: str  # e.g. silver.orders, bronze.olist_postgres.orders
     key: tuple[str, ...]
     scope: str
     optional: bool
@@ -55,7 +68,7 @@ class TableChecks:
 @dataclass(frozen=True)
 class Suite:
     layer: str
-    batch_column: str               # column that marks the batch: ingest_date (Bronze) or _batch_date
+    batch_column: str  # column that marks the batch: ingest_date (Bronze) or _batch_date
     tables: tuple[TableChecks, ...]
 
 
@@ -89,14 +102,17 @@ def load_suite(layer: str, path: Path | None = None) -> Suite:
         for i, spec in enumerate(tspec.get("checks") or []):
             ctype = spec.get("type")
             if ctype not in REQUIRED:
-                raise DQConfigError(f"{where}: check #{i + 1} has unknown type {ctype!r} "
-                                    f"(expected one of {sorted(REQUIRED)})")
+                raise DQConfigError(
+                    f"{where}: check #{i + 1} has unknown type {ctype!r} (expected one of {sorted(REQUIRED)})"
+                )
             missing = [p for p in REQUIRED[ctype] if p not in spec]
             unknown = set(spec) - set(REQUIRED[ctype]) - OPTIONAL - {"type"}
             if missing or unknown:
-                raise DQConfigError(f"{where}: {ctype} check #{i + 1}: "
-                                    + (f"missing {missing} " if missing else "")
-                                    + (f"unknown parameters {sorted(unknown)}" if unknown else ""))
+                raise DQConfigError(
+                    f"{where}: {ctype} check #{i + 1}: "
+                    + (f"missing {missing} " if missing else "")
+                    + (f"unknown parameters {sorted(unknown)}" if unknown else "")
+                )
             severity = spec.get("severity", "error")
             if severity not in SEVERITIES:
                 raise DQConfigError(f"{where}: {ctype} check #{i + 1}: severity must be error or warn")
@@ -110,6 +126,7 @@ def load_suite(layer: str, path: Path | None = None) -> Suite:
             names.add(name)
             params = {k: v for k, v in spec.items() if k not in ("type", "severity", "scope", "name")}
             checks.append(Check(ctype, params, severity, spec.get("scope"), name))
-        tables.append(TableChecks(tname, tuple(tspec.get("key", ())), scope, bool(tspec.get("optional")),
-                                  tuple(checks)))
+        tables.append(
+            TableChecks(tname, tuple(tspec.get("key", ())), scope, bool(tspec.get("optional")), tuple(checks))
+        )
     return Suite(layer, batch_column, tuple(tables))

@@ -9,8 +9,7 @@ from olist_pipeline.replay_logic import build_index, change_days, order_as_of
 from olist_pipeline.sources import TABLES, TRANSACTIONAL_TABLES, load_sources, read_table
 
 RAW_DIR = load_config(environ={})["paths"]["raw_dir"]
-needs_raw = pytest.mark.skipif(not (RAW_DIR / "olist_orders_dataset.csv").exists(),
-                               reason="Olist CSVs not in data/raw")
+needs_raw = pytest.mark.skipif(not (RAW_DIR / "olist_orders_dataset.csv").exists(), reason="Olist CSVs not in data/raw")
 
 
 def schema_columns() -> dict[str, list[str]]:
@@ -32,13 +31,15 @@ def test_specs_match_schema():
 
 def test_read_table_types_bom_and_nulls(tmp_path, monkeypatch):
     (tmp_path / "product_category_name_translation.csv").write_text(
-        "﻿product_category_name,product_category_name_english\nbeleza_saude,health_beauty\n",
-        encoding="utf-8")
+        "﻿product_category_name,product_category_name_english\nbeleza_saude,health_beauty\n", encoding="utf-8"
+    )
     (tmp_path / "olist_order_items_dataset.csv").write_text(
         '"order_id","order_item_id","product_id","seller_id","shipping_limit_date","price","freight_value"\n'
-        '"o1",1,"p1","s1",2017-09-19 09:45:35,58.90,\n')
+        '"o1",1,"p1","s1",2017-09-19 09:45:35,58.90,\n'
+    )
     assert read_table(tmp_path, "product_category_name_translation") == [
-        {"product_category_name": "beleza_saude", "product_category_name_english": "health_beauty"}]
+        {"product_category_name": "beleza_saude", "product_category_name_english": "health_beauty"}
+    ]
     [item] = read_table(tmp_path, "order_items")
     assert item["order_item_id"] == 1
     assert item["shipping_limit_date"] == datetime(2017, 9, 19, 9, 45, 35)

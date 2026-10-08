@@ -1,4 +1,5 @@
 """Create the source schema and load the reference tables (insert-only, safe to rerun)."""
+
 from olist_pipeline.config import load_config
 from olist_pipeline.db import apply_schema, connect
 from olist_pipeline.seed import seed_reference

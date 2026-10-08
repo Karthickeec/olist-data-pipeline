@@ -1,11 +1,12 @@
 """Client for the customer-activity API: paging, retries with backoff, raw landing."""
+
 import logging
 import random
 import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -38,15 +39,23 @@ def parse_retry_after(value: str | None) -> float | None:
     except ValueError:
         pass
     try:
-        return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        return max(0.0, (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds())
     except (TypeError, ValueError):
         return None
 
 
 class ActivityClient:
-    def __init__(self, http: httpx.Client, api_key: str, page_size: int = 200, max_attempts: int = 5,
-                 backoff_base: float = 0.5, backoff_max: float = 30.0,
-                 sleep: Callable[[float], None] = time.sleep, jitter: random.Random | None = None):
+    def __init__(
+        self,
+        http: httpx.Client,
+        api_key: str,
+        page_size: int = 200,
+        max_attempts: int = 5,
+        backoff_base: float = 0.5,
+        backoff_max: float = 30.0,
+        sleep: Callable[[float], None] = time.sleep,
+        jitter: random.Random | None = None,
+    ):
         self.http = http
         self.api_key = api_key
         self.page_size = page_size
@@ -82,8 +91,16 @@ class ActivityClient:
                 raise ApiError(f"{day} page {page}: giving up after {attempt} attempts (last: {reason})")
             wait = retry_after if retry_after is not None else self.backoff(attempt)
             source = "Retry-After" if retry_after is not None else "backoff"
-            log.warning("retry %s page %d: %s on attempt %d/%d, waiting %.2fs (%s)",
-                        day, page, reason, attempt, self.max_attempts, wait, source)
+            log.warning(
+                "retry %s page %d: %s on attempt %d/%d, waiting %.2fs (%s)",
+                day,
+                page,
+                reason,
+                attempt,
+                self.max_attempts,
+                wait,
+                source,
+            )
             self.stats.retries += 1
             self.stats.wait_seconds += wait
             self.sleep(wait)

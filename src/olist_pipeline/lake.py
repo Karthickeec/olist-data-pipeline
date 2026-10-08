@@ -1,4 +1,5 @@
 """Lake paths and partition writes. Paths are plain strings so the root can be s3://."""
+
 from datetime import date, datetime
 
 from pyspark.sql import DataFrame, SparkSession
@@ -74,15 +75,13 @@ def overwrite_partition(spark: SparkSession, df: DataFrame, table_dir: str, colu
     if df.isEmpty():
         delete_path(spark, part)
         return 0
-    (df.write.mode("overwrite")
-        .option("partitionOverwriteMode", "dynamic")
-        .partitionBy(column)
-        .parquet(table_dir))
+    (df.write.mode("overwrite").option("partitionOverwriteMode", "dynamic").partitionBy(column).parquet(table_dir))
     return spark.read.parquet(part).count()
 
 
-def write_partition(spark: SparkSession, df: DataFrame, table_dir: str, batch_date: date,
-                    source: str, ingested_at: datetime) -> int:
+def write_partition(
+    spark: SparkSession, df: DataFrame, table_dir: str, batch_date: date, source: str, ingested_at: datetime
+) -> int:
     """Add the Bronze metadata and replace partition `batch_date` of `table_dir` (and nothing else)."""
     out = add_metadata(df, batch_date, source, ingested_at)
     return overwrite_partition(spark, out, table_dir, PARTITION_COLUMN, batch_date)

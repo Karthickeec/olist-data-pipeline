@@ -1,10 +1,9 @@
 import copy
-import json
 from datetime import date, datetime
 
 import pytest
-
 from conftest import assert_same_rows
+
 from olist_pipeline.bronze.files_to_bronze import ingest_customer_changes
 from olist_pipeline.config import load_config
 from olist_pipeline.customer_changes import partition_dir, write_changes
@@ -12,9 +11,15 @@ from olist_pipeline.lake import partition_path
 
 DAY = date(2017, 3, 1)
 RUN = datetime(2026, 10, 8, 12, 0, 0)
-GOOD = {"change_id": "c1", "customer_unique_id": "u1", "new_zip_code_prefix": "01037",
-        "new_city": "sao paulo", "new_state": "SP", "requested_at": "2017-03-01 10:00:00",
-        "source": "crm_portal"}
+GOOD = {
+    "change_id": "c1",
+    "customer_unique_id": "u1",
+    "new_zip_code_prefix": "01037",
+    "new_city": "sao paulo",
+    "new_state": "SP",
+    "requested_at": "2017-03-01 10:00:00",
+    "source": "crm_portal",
+}
 
 
 @pytest.fixture
@@ -30,12 +35,15 @@ def bronze_partition(spark, cfg, day=DAY):
 
 
 def test_keeps_every_row_including_dirty_and_malformed(spark, cfg):
-    records = [GOOD, GOOD,                                          # exact duplicate
-               {**GOOD, "change_id": "c2", "new_state": " sp "},    # messy state
-               {**GOOD, "change_id": "c3", "new_city": None}]       # null city
+    records = [
+        GOOD,
+        GOOD,  # exact duplicate
+        {**GOOD, "change_id": "c2", "new_state": " sp "},  # messy state
+        {**GOOD, "change_id": "c3", "new_city": None},
+    ]  # null city
     path = write_changes(cfg["paths"]["landing_dir"], DAY, records)
     with open(path, "a", encoding="utf-8") as f:
-        f.write('{"change_id": "c4", "customer_unique_id": \n')    # not valid JSON
+        f.write('{"change_id": "c4", "customer_unique_id": \n')  # not valid JSON
 
     result = ingest_customer_changes(spark, cfg, DAY, RUN)
     assert result.rows == 5

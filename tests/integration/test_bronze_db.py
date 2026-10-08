@@ -1,4 +1,5 @@
 """Bronze against a real Postgres: throwaway schemas, lake and landing in a temp dir."""
+
 import copy
 import shutil
 from datetime import date
@@ -7,10 +8,10 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from conftest import assert_same_rows, require_raw_csvs
 from pyspark.sql import Window as W
 from pyspark.sql import functions as F
 
-from conftest import assert_same_rows
 from olist_pipeline.bronze import utc_now
 from olist_pipeline.bronze.files_to_bronze import ingest_customer_changes
 from olist_pipeline.bronze.postgres_to_bronze import SOURCE, ingest_reference, run
@@ -34,6 +35,7 @@ INSERT_ONLY = ("customers", "order_items", "order_payments", "order_reviews")
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
     cfg = copy.deepcopy(load_config())
+    require_raw_csvs(cfg["paths"]["raw_dir"])
     tmp = tmp_path_factory.mktemp("bronze")
     cfg["pg"]["schema"], cfg["pg"]["pipeline_schema"] = SCHEMA, PIPELINE
     cfg["lake"]["root"] = str(tmp / "lake")
@@ -47,16 +49,16 @@ def env(tmp_path_factory):
     apply_schema(conn, SCHEMA)
     seed_reference(conn, cfg["paths"]["raw_dir"], tables=REFERENCE)
     src = load_sources(cfg["paths"]["raw_dir"])
-    yield SimpleNamespace(cfg=cfg, conn=conn, src=src, idx=build_index(src),
-                          pool=read_address_pool(cfg["paths"]["raw_dir"]), tmp=tmp)
+    yield SimpleNamespace(
+        cfg=cfg, conn=conn, src=src, idx=build_index(src), pool=read_address_pool(cfg["paths"]["raw_dir"]), tmp=tmp
+    )
     for s in (SCHEMA, PIPELINE, "pipeline_ref_test"):
         conn.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
     conn.close()
 
 
 def replay(env, day):
-    replay_day(env.conn, env.src, env.idx, day, env.cfg["paths"]["landing_dir"], env.pool,
-               env.cfg["customer_changes"])
+    replay_day(env.conn, env.src, env.idx, day, env.cfg["paths"]["landing_dir"], env.pool, env.cfg["customer_changes"])
 
 
 def bronze(spark, env, day) -> dict:
@@ -79,7 +81,9 @@ def read_partition(spark, path: Path):
 def ingest_run(env, table, day):
     return env.conn.execute(
         f"SELECT low_wm, high_wm, row_count FROM {PIPELINE}.ingest_runs "
-        "WHERE source = %s AND table_name = %s AND batch_date = %s", (SOURCE, table, day)).fetchone()
+        "WHERE source = %s AND table_name = %s AND batch_date = %s",
+        (SOURCE, table, day),
+    ).fetchone()
 
 
 def pg_count(env, table, low, high):
@@ -129,8 +133,9 @@ def test_three_days_then_rerun_middle_day(spark, env):
         else:
             assert_same_rows(saved[table], rerun[table])
     # Orders: identical minus the orders that changed again on day 3 (they now live in day 3).
-    moved = [r[0] for r in env.conn.execute(
-        "SELECT order_id FROM orders WHERE updated_at > %s", (end_of_day(DAYS[1]),))]
+    moved = [
+        r[0] for r in env.conn.execute("SELECT order_id FROM orders WHERE updated_at > %s", (end_of_day(DAYS[1]),))
+    ]
     expected = saved["orders"].filter(~F.col("order_id").isin(moved))
     assert expected.count() < saved["orders"].count(), "expected some day-2 orders to move to day 3"
     assert_same_rows(expected, rerun["orders"])
@@ -142,10 +147,12 @@ def test_three_days_then_rerun_middle_day(spark, env):
     for table in TRANSACTIONAL_TABLES:
         spec = TABLES[table]
         cols = list(spec.column_names) + ["updated_at"]
-        latest = (spark.read.parquet(bronze_dir(env, table))
-                  .withColumn("_rn", F.row_number().over(
-                      W.partitionBy(*spec.key).orderBy(F.col("updated_at").desc())))
-                  .filter("_rn = 1").select(cols))
+        latest = (
+            spark.read.parquet(bronze_dir(env, table))
+            .withColumn("_rn", F.row_number().over(W.partitionBy(*spec.key).orderBy(F.col("updated_at").desc())))
+            .filter("_rn = 1")
+            .select(cols)
+        )
         source = read_jdbc(spark, env.cfg, query=f'SELECT * FROM "{SCHEMA}"."{table}"').select(cols)
         assert_same_rows(latest, source)
 
@@ -170,18 +177,19 @@ def test_reference_snapshot_written_skipped_and_rewritten(spark, env):
     assert spark.read.parquet(partition_path(sellers, d1)).count() == 3095
 
     seller_id, city = env.conn.execute(
-        "SELECT seller_id, seller_city FROM sellers ORDER BY seller_id LIMIT 1").fetchone()
+        "SELECT seller_id, seller_city FROM sellers ORDER BY seller_id LIMIT 1"
+    ).fetchone()
     env.conn.execute("UPDATE sellers SET seller_city = 'renamed' WHERE seller_id = %s", (seller_id,))
     try:
         third = ingest_reference(spark, cfg, env.conn, book, "sellers", d3, utc_now())
     finally:
         env.conn.execute("UPDATE sellers SET seller_city = %s WHERE seller_id = %s", (city, seller_id))
     assert (third.action, third.rows) == ("written", 3095)
-    assert spark.read.parquet(partition_path(sellers, d3)).filter(
-        F.col("seller_city") == "renamed").count() == 1
+    assert spark.read.parquet(partition_path(sellers, d3)).filter(F.col("seller_city") == "renamed").count() == 1
 
     snapshots = env.conn.execute(
-        "SELECT batch_date FROM pipeline_ref_test.reference_snapshots ORDER BY batch_date").fetchall()
+        "SELECT batch_date FROM pipeline_ref_test.reference_snapshots ORDER BY batch_date"
+    ).fetchall()
     assert [r[0] for r in snapshots] == [d1, d3]
 
 
@@ -191,7 +199,7 @@ def test_window_after_gap_and_rerun(env):
     d1, d2 = date(2018, 1, 1), date(2018, 1, 2)
     for day in (d1, d2):
         book.record_run("t", "x", day, book.window("t", "x", day), 0)
-    assert book.window("t", "x", date(2018, 1, 5)).low == end_of_day(d2)   # catch-up after a gap
-    assert book.window("t", "x", d2).low == end_of_day(d1)                  # rerun reuses its window
-    book.record_run("t", "x", d1, book.window("t", "x", d1), 0)            # rerun of an older day
-    assert book.watermark("t", "x") == end_of_day(d2)                       # never moves back
+    assert book.window("t", "x", date(2018, 1, 5)).low == end_of_day(d2)  # catch-up after a gap
+    assert book.window("t", "x", d2).low == end_of_day(d1)  # rerun reuses its window
+    book.record_run("t", "x", d1, book.window("t", "x", d1), 0)  # rerun of an older day
+    assert book.watermark("t", "x") == end_of_day(d2)  # never moves back

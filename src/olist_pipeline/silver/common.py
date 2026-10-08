@@ -6,14 +6,14 @@ then swap each staged partition into place. Unpartitioned tables are swapped who
 A crash between swaps can leave a partition missing; `--full-refresh` rebuilds any
 table from Bronze, which stays the source of truth (Iceberg would make this atomic).
 """
+
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-from olist_pipeline.lake import (PARTITION_COLUMN, delete_path, list_dirs, move_path,
-                                 overwrite_partition, path_exists)
+from olist_pipeline.lake import PARTITION_COLUMN, delete_path, list_dirs, move_path, overwrite_partition, path_exists
 
 BRONZE_INGEST_DATE = "_bronze_ingest_date"
 REASON = "_reason"
@@ -79,9 +79,11 @@ def add_silver_metadata(df: DataFrame, batch_date: date, processed_at: datetime)
     """_batch_date: batch that wrote this version; _first_batch_date: batch that first wrote the key
     (kept as the minimum by merge_into); _processed_at: wall clock."""
     batch = F.lit(batch_date.isoformat()).cast("date")
-    return (df.withColumn("_batch_date", batch)
-              .withColumn(FIRST_BATCH, batch)
-              .withColumn("_processed_at", F.lit(processed_at.isoformat(sep=" ")).cast("timestamp")))
+    return (
+        df.withColumn("_batch_date", batch)
+        .withColumn(FIRST_BATCH, batch)
+        .withColumn("_processed_at", F.lit(processed_at.isoformat(sep=" ")).cast("timestamp"))
+    )
 
 
 def write_quarantine(spark: SparkSession, df: DataFrame, root: str, table: str, batch_date: date) -> int:
@@ -96,9 +98,18 @@ class MergeResult:
     partitions: list[str]
 
 
-def merge_into(spark: SparkSession, new: DataFrame, root: str, table: str, key: list[str],
-               order: list[Column], partition_col: str | None = None,
-               full_refresh: bool = False, union_existing: bool = True, layer: str = "silver") -> MergeResult:
+def merge_into(
+    spark: SparkSession,
+    new: DataFrame,
+    root: str,
+    table: str,
+    key: list[str],
+    order: list[Column],
+    partition_col: str | None = None,
+    full_refresh: bool = False,
+    union_existing: bool = True,
+    layer: str = "silver",
+) -> MergeResult:
     """Merge `new` into <layer>/<table>: latest row per key, idempotent, partition-scoped.
 
     `new` must have the table's full Silver schema. With full_refresh the existing table
@@ -113,8 +124,7 @@ def merge_into(spark: SparkSession, new: DataFrame, root: str, table: str, key: 
             return MergeResult(0, [])
         combined = new
         if exists:
-            existing = (spark.read.parquet(target)
-                        .filter(F.col(partition_col).isin(parts)).select(*new.columns))
+            existing = spark.read.parquet(target).filter(F.col(partition_col).isin(parts)).select(*new.columns)
             combined = new.unionByName(existing)
     else:
         parts = []

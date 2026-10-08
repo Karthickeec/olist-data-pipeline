@@ -4,8 +4,9 @@ Credentials always come from the default chain (the local AWS profile, or a role
 nothing here reads, prints or stores keys. Secret values are wrapped in `Secret`, whose repr
 is masked, so a config dump or traceback never shows them.
 """
+
 import json
-from functools import lru_cache
+from functools import cache
 
 SECRET_SCHEME = "secret://"
 # Short region codes for bucket names (bucket names are global, so they carry account and region).
@@ -22,10 +23,11 @@ class Secret(str):
 
 def session(region: str):
     import boto3  # imported lazily: local runs and tests don't need AWS
+
     return boto3.session.Session(region_name=region)
 
 
-@lru_cache(maxsize=None)
+@cache
 def account_id(region: str) -> str:
     return session(region).client("sts").get_caller_identity()["Account"]
 
@@ -42,13 +44,13 @@ def parse_secret_ref(ref: str) -> tuple[str, str]:
     """secret://<secret id>#<json field> -> (secret id, field)."""
     if not ref.startswith(SECRET_SCHEME) or "#" not in ref:
         raise ValueError(f"expected secret://<id>#<field>, got {ref.split('#')[0]!r}")
-    secret_id, _, field = ref[len(SECRET_SCHEME):].partition("#")
+    secret_id, _, field = ref[len(SECRET_SCHEME) :].partition("#")
     if not secret_id or not field:
         raise ValueError("expected secret://<id>#<field>")
     return secret_id, field
 
 
-@lru_cache(maxsize=None)
+@cache
 def _secret_json(secret_id: str, region: str) -> dict:
     """One GetSecretValue call per secret per process."""
     value = session(region).client("secretsmanager").get_secret_value(SecretId=secret_id)["SecretString"]

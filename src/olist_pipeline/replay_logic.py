@@ -2,6 +2,7 @@
 
 No database access here, so everything is unit-testable.
 """
+
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -61,10 +62,7 @@ def change_days(order: dict) -> set[date]:
     A milestone dated on or before the purchase day is already visible at purchase.
     """
     bought = purchase_day(order)
-    return {bought} | {
-        order[c].date() for c in MILESTONES
-        if order[c] is not None and order[c].date() > bought
-    }
+    return {bought} | {order[c].date() for c in MILESTONES if order[c] is not None and order[c].date() > bought}
 
 
 def review_release_day(review: dict, order: dict) -> date:
@@ -75,7 +73,7 @@ def review_release_day(review: dict, order: dict) -> date:
 @dataclass
 class ReplayIndex:
     purchased_on: dict[date, list[str]] = field(default_factory=dict)
-    changed_on: dict[date, list[str]] = field(default_factory=dict)   # milestone days after purchase
+    changed_on: dict[date, list[str]] = field(default_factory=dict)  # milestone days after purchase
     reviews_on: dict[date, list[dict]] = field(default_factory=dict)
     # customer_unique_ids ordered by the day each was first seen (ties by id),
     # so "customers known by day D" is a prefix of this list.
@@ -85,7 +83,7 @@ class ReplayIndex:
     last_day: date | None = None
 
     def known_customers(self, day: date) -> list[str]:
-        return self.known_ids[:bisect_right(self.known_days, day)]
+        return self.known_ids[: bisect_right(self.known_days, day)]
 
 
 def build_index(src: Sources) -> ReplayIndex:

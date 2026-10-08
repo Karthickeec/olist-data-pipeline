@@ -1,4 +1,5 @@
 """uvicorn entry point: `uvicorn olist_pipeline.api.server:app_from_config --factory`."""
+
 import os
 
 from fastapi import FastAPI

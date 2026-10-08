@@ -1,4 +1,5 @@
 """Check implementations. Each takes the scoped DataFrame and returns a CheckOutcome."""
+
 import json
 from dataclasses import dataclass, field
 
@@ -16,7 +17,7 @@ class CheckOutcome:
     observed: float | None = None
     sample: list = field(default_factory=list)
     message: str = ""
-    failed: bool | None = None      # set explicitly by checks that are not row based
+    failed: bool | None = None  # set explicitly by checks that are not row based
 
 
 class ColumnMissing(Exception):
@@ -59,8 +60,13 @@ def unique(df: DataFrame, check: Check, key: list[str]) -> CheckOutcome:
     if not groups:
         return CheckOutcome()
     rows = dupes.agg(F.sum("count")).first()[0]
-    sample = [json.loads(r.j) for r in dupes.select(F.to_json(F.struct(*cols, "count")).alias("j"))
-              .orderBy(F.col("count").desc()).limit(SAMPLE_ROWS).collect()]
+    sample = [
+        json.loads(r.j)
+        for r in dupes.select(F.to_json(F.struct(*cols, "count")).alias("j"))
+        .orderBy(F.col("count").desc())
+        .limit(SAMPLE_ROWS)
+        .collect()
+    ]
     return CheckOutcome(failed_rows=rows, sample=sample, message=f"{groups} duplicated key(s)")
 
 
@@ -98,10 +104,14 @@ def schema(df: DataFrame, check: Check, key: list[str]) -> CheckOutcome:
         elif actual[col] != expected:
             problems.append({"column": col, "expected": expected, "actual": actual[col]})
     if not check.get("allow_extra", True):
-        problems += [{"column": c, "expected": None, "actual": t} for c, t in actual.items()
-                     if c not in check["columns"]]
-    return CheckOutcome(failed_rows=len(problems), sample=problems[:SAMPLE_ROWS],
-                        message=f"{len(problems)} column problem(s)" if problems else "")
+        problems += [
+            {"column": c, "expected": None, "actual": t} for c, t in actual.items() if c not in check["columns"]
+        ]
+    return CheckOutcome(
+        failed_rows=len(problems),
+        sample=problems[:SAMPLE_ROWS],
+        message=f"{len(problems)} column problem(s)" if problems else "",
+    )
 
 
 def relationship(df: DataFrame, check: Check, key: list[str], parent: DataFrame, ref_column: str) -> CheckOutcome:
@@ -121,9 +131,11 @@ def row_count_vs_previous(df: DataFrame, check: Check, previous: float | None) -
     if not previous:
         return CheckOutcome(observed=n, failed=False, message="no previous batch to compare with")
     ratio = n / previous
-    return CheckOutcome(observed=n, failed=not (lo <= ratio <= hi),
-                        message=f"{n} rows vs {int(previous)} in the previous batch (ratio {ratio:.2f}, "
-                                f"allowed {lo}-{hi})")
+    return CheckOutcome(
+        observed=n,
+        failed=not (lo <= ratio <= hi),
+        message=f"{n} rows vs {int(previous)} in the previous batch (ratio {ratio:.2f}, allowed {lo}-{hi})",
+    )
 
 
 ROW_CHECKS = {

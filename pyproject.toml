@@ -16,3 +16,17 @@ testpaths = ["tests"]
 markers = [
     "integration: needs a running Postgres (skipped when it is unreachable)",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"      # Glue 5.0 runs Python 3.11
+extend-exclude = ["airflow/logs", "data", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["olist_pipeline", "olist_common"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Query", "fastapi.Depends"]   # FastAPI's parameter declarations

@@ -19,7 +19,7 @@ endif
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
         spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo airflow-venv airflow-setup airflow airflow-stop backfill verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset \
-        no-target aws-publish run-days glue-deploy glue-run aws-pull aws-check aws-up aws-sync aws-status aws-glue-test aws-down verify-s3-parity athena-ddl athena-create \
+        lint no-target aws-publish run-days glue-deploy glue-run aws-pull aws-check aws-up aws-sync aws-status aws-glue-test aws-down verify-s3-parity athena-ddl athena-create \
         athena-queries athena-check athena-register-partitions small-files-experiment
 
 # A bare `make` (or a mistyped `make "dq LAYER=bronze"`, which make reads as a variable assignment with
@@ -204,6 +204,9 @@ athena-check:  ## Athena answers equal Spark answers on the S3 lake: make athena
 
 athena-register-partitions:  ## Fallback without partition projection: register partitions, compare counts
 	$(PY) scripts/athena.py register-partitions
+
+lint:  ## ruff check + format check (what CI runs)
+	.venv/bin/ruff check . && .venv/bin/ruff format --check .
 
 test:  ## All tests (integration tests skip if Postgres is down)
 	$(PY) -m pytest -q

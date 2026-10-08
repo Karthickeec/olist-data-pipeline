@@ -7,6 +7,7 @@
 
 Afterwards, replay and ingest day by day (`make daily DATE=...`).
 """
+
 import shutil
 from pathlib import Path
 
@@ -20,10 +21,8 @@ from olist_pipeline.sources import TRANSACTIONAL_TABLES
 def main() -> None:
     cfg = load_config()
     with connect(cfg["pg"]) as conn, conn.transaction():
-        conn.execute(sql.SQL("TRUNCATE {}").format(
-            sql.SQL(", ").join(map(sql.Identifier, TRANSACTIONAL_TABLES))))
-        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-            sql.Identifier(cfg["pg"]["pipeline_schema"])))
+        conn.execute(sql.SQL("TRUNCATE {}").format(sql.SQL(", ").join(map(sql.Identifier, TRANSACTIONAL_TABLES))))
+        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(cfg["pg"]["pipeline_schema"])))
     print(f"truncated {', '.join(TRANSACTIONAL_TABLES)}; dropped schema {cfg['pg']['pipeline_schema']}")
 
     for path in (str(cfg["paths"]["landing_dir"]), cfg["lake"]["root"]):

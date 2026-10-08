@@ -21,17 +21,23 @@ def write_yaml(tmp_path, text: str):
 def lake(spark, tmp_path):
     """silver.items: one clean batch (PREV) and one dirty batch (D); silver.parents: the keys."""
     root = str(tmp_path / "lake")
-    items = spark.createDataFrame([
-        ("a", "p1", 10.0, "SP", PREV), ("b", "p1", 20.0, "RJ", PREV),
-        ("c", "p1", 5.0, "SP", D),
-        ("c", "p2", 7.0, "SP", D),          # duplicate id
-        ("d", None, 3.0, "XX", D),           # null parent, bad state
-        ("e", "p9", -1.0, "MG", D),          # orphan parent, negative price
-    ], "id string, parent string, price double, state string, _batch_date date")
+    items = spark.createDataFrame(
+        [
+            ("a", "p1", 10.0, "SP", PREV),
+            ("b", "p1", 20.0, "RJ", PREV),
+            ("c", "p1", 5.0, "SP", D),
+            ("c", "p2", 7.0, "SP", D),  # duplicate id
+            ("d", None, 3.0, "XX", D),  # null parent, bad state
+            ("e", "p9", -1.0, "MG", D),  # orphan parent, negative price
+        ],
+        "id string, parent string, price double, state string, _batch_date date",
+    )
     items.write.parquet(f"{root}/silver/items")
-    (spark.createDataFrame([("p1",), ("p2",)], "parent_id string")
-     .withColumn("_batch_date", F.lit(PREV).cast("date"))
-     .write.parquet(f"{root}/silver/parents"))
+    (
+        spark.createDataFrame([("p1",), ("p2",)], "parent_id string")
+        .withColumn("_batch_date", F.lit(PREV).cast("date"))
+        .write.parquet(f"{root}/silver/parents")
+    )
     return root
 
 
@@ -78,7 +84,7 @@ def test_each_check_fails_on_the_dirty_batch(spark, lake, tmp_path):
     assert (rel.status, rel.outcome.failed_rows, rel.outcome.sample) == ("fail", 1, [{"id": "e", "parent": "p9"}])
     assert r[t, "schema:columns"].status == "pass"
     assert (r[t, "price_positive"].status, r[t, "price_positive"].outcome.failed_rows) == ("fail", 1)
-    assert r[t, "row_count_vs_previous"].outcome.observed == 4      # no conn: no baseline
+    assert r[t, "row_count_vs_previous"].outcome.observed == 4  # no conn: no baseline
     assert r[t, "unique_all_time"].status == "fail"
     assert r["silver.missing", "unique:id"].status == "skipped"
     assert r["silver.also_missing", "unique:id"].status == "error_running"
@@ -104,15 +110,18 @@ tables:
     assert {"column": "price", "expected": "int", "actual": "double"} in schema.outcome.sample
     missing = r["silver.items", "not_null:no_such_column"]
     assert missing.status == "error_running" and "no_such_column" in missing.outcome.message
-    assert missing.blocking                       # even a warn check that cannot run blocks the run
+    assert missing.blocking  # even a warn check that cannot run blocks the run
 
 
 def test_row_count_vs_previous():
     check = Check("row_count_vs_previous", {"min_ratio": 0.5, "max_ratio": 2}, "warn", None, "rc")
 
     class Df:
-        def __init__(self, n): self.n = n
-        def count(self): return self.n
+        def __init__(self, n):
+            self.n = n
+
+        def count(self):
+            return self.n
 
     assert C.row_count_vs_previous(Df(10), check, None).failed is False
     assert C.row_count_vs_previous(Df(10), check, 8).failed is False
@@ -120,15 +129,18 @@ def test_row_count_vs_previous():
     assert "ratio 0.10" in C.row_count_vs_previous(Df(10), check, 100).message
 
 
-@pytest.mark.parametrize("text, message", [
-    ("tables: {t: {checks: [{type: not_a_check}]}}", "unknown type 'not_a_check'"),
-    ("tables: {t: {checks: [{type: unique}]}}", "missing ['columns']"),
-    ("tables: {t: {checks: [{type: unique, columns: [a], colums: [b]}]}}", "unknown parameters ['colums']"),
-    ("tables: {t: {checks: [{type: unique, columns: [a], severity: fatal}]}}", "severity must be error or warn"),
-    ("tables: {t: {checks: [{type: range, column: a}]}}", "needs min and/or max"),
-    ("tables: {t: {scope: weekly, checks: []}}", "unknown scope 'weekly'"),
-    ("tables: {t: {checks: [{type: unique, columns: [a]}, {type: unique, columns: [a]}]}}", "duplicate check name"),
-])
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("tables: {t: {checks: [{type: not_a_check}]}}", "unknown type 'not_a_check'"),
+        ("tables: {t: {checks: [{type: unique}]}}", "missing ['columns']"),
+        ("tables: {t: {checks: [{type: unique, columns: [a], colums: [b]}]}}", "unknown parameters ['colums']"),
+        ("tables: {t: {checks: [{type: unique, columns: [a], severity: fatal}]}}", "severity must be error or warn"),
+        ("tables: {t: {checks: [{type: range, column: a}]}}", "needs min and/or max"),
+        ("tables: {t: {scope: weekly, checks: []}}", "unknown scope 'weekly'"),
+        ("tables: {t: {checks: [{type: unique, columns: [a]}, {type: unique, columns: [a]}]}}", "duplicate check name"),
+    ],
+)
 def test_invalid_suites_are_rejected(tmp_path, text, message):
     with pytest.raises(DQConfigError, match=message.replace("[", r"\[").replace("]", r"\]")):
         load_suite("silver", write_yaml(tmp_path, text))

@@ -7,11 +7,12 @@
 TASK: silver, gold, dq_silver, dq_gold. Airflow runs export -> GlueJobOperator -> import instead of `run`.
 Every finished run is appended to data/glue_runs.jsonl with its DPU-seconds and cost.
 """
+
 import argparse
 import json
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from olist_pipeline.aws import account_id, bucket_name, session
 from olist_pipeline.config import PROJECT_ROOT, load_config
@@ -21,7 +22,7 @@ from olist_pipeline.watermarks import Bookkeeping
 
 JOB = "olist-spark"
 TASKS = ("silver", "gold", "dq_silver", "dq_gold")
-FLEX_DPU_HOUR = 0.29        # ap-southeast-2, Glue 5.0 Flex (AWS Pricing API, 2026-10-09)
+FLEX_DPU_HOUR = 0.29  # ap-southeast-2, Glue 5.0 Flex (AWS Pricing API, 2026-10-09)
 LEDGER = PROJECT_ROOT / "data" / "glue_runs.jsonl"
 
 
@@ -51,15 +52,22 @@ def cmd_export(ctx: Ctx, task: str, day: date) -> None:
     ctx.s3.put_object(Bucket=ctx.bucket, Key=ctx.key(task, day, "state.json"), Body=json.dumps(state).encode())
     ctx.s3.delete_object(Bucket=ctx.bucket, Key=ctx.key(task, day, "output.json"))  # no stale output on a rerun
     n = sum(len(t) for t in state["layer_runs"].values())
-    print(f"exported state for {task} {day}: {n} layer/table runs, "
-          f"{sum(len(c) for t in state['dq_observed'].values() for c in t.values())} DQ observations")
+    print(
+        f"exported state for {task} {day}: {n} layer/table runs, "
+        f"{sum(len(c) for t in state['dq_observed'].values() for c in t.values())} DQ observations"
+    )
 
 
 def run_cost(ctx: Ctx, run_id: str) -> dict:
     run = ctx.glue.get_job_run(JobName=JOB, RunId=run_id)["JobRun"]
     dpu = run.get("DPUSeconds") or max(run.get("ExecutionTime", 0), 60) * 2
-    return {"run_id": run_id, "state": run["JobRunState"], "execution_s": run.get("ExecutionTime", 0),
-            "dpu_seconds": dpu, "usd": round(dpu / 3600 * FLEX_DPU_HOUR, 4)}
+    return {
+        "run_id": run_id,
+        "state": run["JobRunState"],
+        "execution_s": run.get("ExecutionTime", 0),
+        "dpu_seconds": dpu,
+        "usd": round(dpu / 3600 * FLEX_DPU_HOUR, 4),
+    }
 
 
 def cmd_import(ctx: Ctx, task: str, day: date, run_id: str | None) -> int:
@@ -72,15 +80,23 @@ def cmd_import(ctx: Ctx, task: str, day: date, run_id: str | None) -> int:
     with connect(ctx.cfg["pg"]) as conn:
         n_runs, n_dq = import_outputs(book(ctx, conn), outputs)
     cost = run_cost(ctx, run_id) if run_id else {}
-    entry = {"task": task, "batch_date": day.isoformat(), "summary": outputs["summary"],
-             "job_seconds": outputs["seconds"], "spark_version": outputs["spark_version"], **cost,
-             "logged_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    entry = {
+        "task": task,
+        "batch_date": day.isoformat(),
+        "summary": outputs["summary"],
+        "job_seconds": outputs["seconds"],
+        "spark_version": outputs["spark_version"],
+        **cost,
+        "logged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with open(LEDGER, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
-    print(f"imported {task} {day}: {n_runs} layer runs, {n_dq} DQ results; summary {outputs['summary']}; "
-          f"Spark {outputs['spark_version']}, {outputs['seconds']} s in the job"
-          + (f"; {cost['dpu_seconds']:.0f} DPU-s = ${cost['usd']:.4f}" if cost else ""))
+    print(
+        f"imported {task} {day}: {n_runs} layer runs, {n_dq} DQ results; summary {outputs['summary']}; "
+        f"Spark {outputs['spark_version']}, {outputs['seconds']} s in the job"
+        + (f"; {cost['dpu_seconds']:.0f} DPU-s = ${cost['usd']:.4f}" if cost else "")
+    )
     if task.startswith("dq_") and outputs["summary"].get("blocking"):
         print(f"DQ {task[3:]} {day}: {outputs['summary']['blocking']} blocking failures")
         return 1
@@ -91,8 +107,9 @@ def start(ctx: Ctx, task: str, day: date, attempts: int = 20) -> str:
     """Start the job; MaxConcurrentRuns=1 can briefly still count a run that just SUCCEEDED, so retry."""
     for attempt in range(attempts):
         try:
-            return ctx.glue.start_job_run(JobName=JOB, Arguments={
-                "--TASK": task, "--DATE": day.isoformat()})["JobRunId"]
+            return ctx.glue.start_job_run(JobName=JOB, Arguments={"--TASK": task, "--DATE": day.isoformat()})[
+                "JobRunId"
+            ]
         except ctx.glue.exceptions.ConcurrentRunsExceededException:
             if attempt == attempts - 1:
                 raise

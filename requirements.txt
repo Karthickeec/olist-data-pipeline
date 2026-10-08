@@ -6,3 +6,4 @@ uvicorn==0.53.0
 httpx==0.28.1
 boto3==1.43.110
 pytest>=8,<9
+ruff==0.16.10

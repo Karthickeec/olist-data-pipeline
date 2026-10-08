@@ -9,20 +9,20 @@
 For each: wall time (median of 3 runs) and, for the stage after the shuffle, rows read and run
 time per task (max vs median, from Spark's REST API). Writes docs/SALTING.md.
 """
+
 import json
 import statistics
 import time
 import urllib.request
-from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from olist_pipeline.config import PROJECT_ROOT, load_config
 from olist_pipeline.silver.common import layer_dir
 from olist_pipeline.spark import build_spark
 
-SCALE = 100         # replicate the fact to make the skew measurable (5M rows), keeping the state mix
+SCALE = 100  # replicate the fact to make the skew measurable (5M rows), keeping the state mix
 SHUFFLE_PARTITIONS = 8
 SALT = 8
 RUNS = 3
@@ -39,28 +39,42 @@ def sum_plain(df: DataFrame, _states: DataFrame) -> DataFrame:
 
 
 def sum_salted(df: DataFrame, _states: DataFrame) -> DataFrame:
-    partial = with_salt(df).groupBy("customer_state", "salt").agg(F.sum("price").alias("r"),
-                                                                   F.count(F.lit(1)).alias("n"))
+    partial = (
+        with_salt(df).groupBy("customer_state", "salt").agg(F.sum("price").alias("r"), F.count(F.lit(1)).alias("n"))
+    )
     return partial.groupBy("customer_state").agg(F.sum("r").alias("revenue"), F.sum("n").alias("lines"))
 
 
 def join_plain(df: DataFrame, states: DataFrame) -> DataFrame:
-    return df.join(states, "customer_state").select("customer_state", "order_id", "order_item_id", "rep",
-                                                    (F.col("price") / F.col("state_avg_price")).alias("price_index"))
+    return df.join(states, "customer_state").select(
+        "customer_state",
+        "order_id",
+        "order_item_id",
+        "rep",
+        (F.col("price") / F.col("state_avg_price")).alias("price_index"),
+    )
 
 
 def join_salted(df: DataFrame, states: DataFrame) -> DataFrame:
     replicated = states.crossJoin(F.broadcast(df.sparkSession.range(SALT).withColumnRenamed("id", "salt")))
-    return (with_salt(df).join(replicated, ["customer_state", "salt"])
-            .select("customer_state", "order_id", "order_item_id", "rep",
-                    (F.col("price") / F.col("state_avg_price")).alias("price_index")))
+    return (
+        with_salt(df)
+        .join(replicated, ["customer_state", "salt"])
+        .select(
+            "customer_state",
+            "order_id",
+            "order_item_id",
+            "rep",
+            (F.col("price") / F.col("state_avg_price")).alias("price_index"),
+        )
+    )
 
 
 QUERIES = {
     "(a) sum+count by state": (sum_plain, sum_salted),
     "(b) sort-merge join on state": (join_plain, join_salted),
 }
-AQE_SKEW_JOIN = {   # thresholds lowered so AQE treats this laptop-sized partition as skewed
+AQE_SKEW_JOIN = {  # thresholds lowered so AQE treats this laptop-sized partition as skewed
     "spark.sql.adaptive.skewJoin.enabled": "true",
     "spark.sql.adaptive.skewJoin.skewedPartitionFactor": "2",
     "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes": "1MB",
@@ -83,12 +97,17 @@ def stage_task_times(spark: SparkSession, group: str) -> dict:
             metrics = [t["taskMetrics"] for t in tasks if t.get("taskMetrics")]
             reads = [m["shuffleReadMetrics"]["recordsRead"] for m in metrics]
             if not metrics or sum(reads) == 0:
-                continue                                    # not a post-shuffle stage
+                continue  # not a post-shuffle stage
             times = [m["executorRunTime"] for m in metrics]
             if busiest is None or max(times) > busiest["max_ms"]:
-                busiest = {"stage": stage_id, "tasks": len(times), "max_ms": max(times),
-                           "median_ms": statistics.median(times), "max_rows": max(reads),
-                           "median_rows": statistics.median(reads)}
+                busiest = {
+                    "stage": stage_id,
+                    "tasks": len(times),
+                    "max_ms": max(times),
+                    "median_ms": statistics.median(times),
+                    "max_rows": max(reads),
+                    "median_rows": statistics.median(reads),
+                }
     return busiest or {}
 
 
@@ -98,7 +117,7 @@ def measure(spark: SparkSession, df: DataFrame, label: str) -> dict:
         group = f"{label}-{i}"
         spark.sparkContext.setJobGroup(group, group)
         t0 = time.perf_counter()
-        df.write.format("noop").mode("overwrite").save()      # full computation, nothing written
+        df.write.format("noop").mode("overwrite").save()  # full computation, nothing written
         walls.append(time.perf_counter() - t0)
     return {"wall_s": statistics.median(walls), "walls": walls, **stage_task_times(spark, group)}
 
@@ -106,32 +125,39 @@ def measure(spark: SparkSession, df: DataFrame, label: str) -> dict:
 def summary(df: DataFrame) -> list[tuple]:
     """Per-state row count and total of the last column, to compare plain and salted results."""
     measure_col = df.columns[-1]
-    return sorted(map(tuple, df.groupBy("customer_state").agg(
-        F.count(F.lit(1)), F.round(F.sum(measure_col), 4)).collect()))
+    return sorted(
+        map(tuple, df.groupBy("customer_state").agg(F.count(F.lit(1)), F.round(F.sum(measure_col), 4)).collect())
+    )
 
 
 def partition_sizes(df: DataFrame, *cols: str) -> list[int]:
     """Rows in each of the shuffle partitions (empty partitions included as 0)."""
-    sizes = {r["p"]: r["count"] for r in df.repartition(SHUFFLE_PARTITIONS, *cols)
-             .groupBy(F.spark_partition_id().alias("p")).count().collect()}
+    sizes = {
+        r["p"]: r["count"]
+        for r in df.repartition(SHUFFLE_PARTITIONS, *cols).groupBy(F.spark_partition_id().alias("p")).count().collect()
+    }
     return [sizes.get(i, 0) for i in range(SHUFFLE_PARTITIONS)]
 
 
 def explain(df: DataFrame) -> str:
     text = df._sc._jvm.PythonSQLUtils.explainString(df._jdf.queryExecution(), "formatted")
-    return text.split("\n\n(1)")[0].strip()          # the operator tree, without the per-node details
+    return text.split("\n\n(1)")[0].strip()  # the operator tree, without the per-node details
 
 
 def main() -> None:
     cfg = load_config()
-    spark = build_spark(cfg, "salting-demo", {"spark.ui.enabled": "true", "spark.ui.port": "4050",
-                                              "spark.ui.showConsoleProgress": "false"})
+    spark = build_spark(
+        cfg,
+        "salting-demo",
+        {"spark.ui.enabled": "true", "spark.ui.port": "4050", "spark.ui.showConsoleProgress": "false"},
+    )
     spark.conf.set("spark.sql.shuffle.partitions", str(SHUFFLE_PARTITIONS))
     # Force sort-merge joins: with broadcasting the small side, there would be no skewed shuffle.
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
     spark.conf.set("spark.sql.adaptive.autoBroadcastJoinThreshold", "-1")
     fact = spark.read.parquet(layer_dir(cfg["lake"]["root"], "gold", "fact_order_lines")).select(
-        "customer_state", "order_id", "order_item_id", "price")
+        "customer_state", "order_id", "order_item_id", "price"
+    )
     big = fact.crossJoin(F.broadcast(spark.range(SCALE).withColumnRenamed("id", "rep"))).cache()
     rows = big.count()
     # A small per-state table. Built as a local DataFrame on purpose: if it were cached straight from a
@@ -148,8 +174,10 @@ def main() -> None:
         a, b = plain(big, states), salty(big, states)
         same[name] = summary(a) == summary(b)
         plans[name] = (explain(a), explain(b))
-        for label, conf in (("off", {"spark.sql.adaptive.enabled": "false"}),
-                            ("on (skew join)", {"spark.sql.adaptive.enabled": "true", **AQE_SKEW_JOIN})):
+        for label, conf in (
+            ("off", {"spark.sql.adaptive.enabled": "false"}),
+            ("on (skew join)", {"spark.sql.adaptive.enabled": "true", **AQE_SKEW_JOIN}),
+        ):
             for k, v in conf.items():
                 spark.conf.set(k, v)
             for variant, df in (("plain", a), ("salted", b)):
@@ -166,13 +194,17 @@ def write_report(rows, top_states, sizes_plain, sizes_salted, results, plans, sa
 
     def row(name, aqe, variant):
         r = results[(name, aqe, variant)]
-        return (f"| {name} | {aqe} | {variant} | {r['wall_s']:.2f} | {r['tasks']} | "
-                f"{r['max_rows']:,} / {int(r['median_rows']):,} | {r['max_ms']} / {int(r['median_ms'])} |")
+        return (
+            f"| {name} | {aqe} | {variant} | {r['wall_s']:.2f} | {r['tasks']} | "
+            f"{r['max_rows']:,} / {int(r['median_rows']):,} | {r['max_ms']} / {int(r['median_ms'])} |"
+        )
 
     def change(name, aqe):
         p, s = results[(name, aqe, "plain")], results[(name, aqe, "salted")]
-        return (f"wall {p['wall_s']:.2f}s → {s['wall_s']:.2f}s, busiest task reads {p['max_rows']:,} → "
-                f"{s['max_rows']:,} rows and runs {p['max_ms']} → {s['max_ms']} ms")
+        return (
+            f"wall {p['wall_s']:.2f}s → {s['wall_s']:.2f}s, busiest task reads {p['max_rows']:,} → "
+            f"{s['max_rows']:,} rows and runs {p['max_ms']} → {s['max_ms']} ms"
+        )
 
     a, b = list(QUERIES)
     jp_off, js_off = results[(b, "off", "plain")], results[(b, "off", "salted")]
@@ -200,12 +232,14 @@ def write_report(rows, top_states, sizes_plain, sizes_salted, results, plans, sa
         "|---|---|---|---|---|---|---|",
         *[row(n, aqe, v) for n in QUERIES for aqe in aqe_labels for v in ("plain", "salted")],
         "",
-        f"The salted results are identical to the plain ones (per-state counts and totals): {a}: {same[a]}, {b}: {same[b]}.",
+        "The salted results are identical to the plain ones (per-state counts and totals): "
+        f"{a}: {same[a]}, {b}: {same[b]}.",
         "",
         "## What the numbers say",
         "",
         f"- **{a}**, AQE off: {change(a, 'off')}.",
-        "  - Spark pre-aggregates each input partition before the shuffle, so every state sends only one row per partition.",
+        "  - Spark pre-aggregates each input partition before the shuffle, so every state sends only one row "
+        "per partition.",
         "  - The skew never reaches the shuffle, and salting just adds a second aggregation.",
         "  - **Don't salt combinable aggregations** (sum, count, min, max, avg).",
         "  - The same goes for `countDistinct`, which Spark shuffles by (key, value), and for `row_number() <= N`",
@@ -226,13 +260,15 @@ def write_report(rows, top_states, sizes_plain, sizes_salted, results, plans, sa
         "    hash-partitioned on the key and Spark skipped its shuffle. AQE then left the skewed join alone",
         "    (no `AQEShuffleRead` in the plan), even with `forceOptimizeSkewedJoin`.",
         "  - That is the same idea as salting, done automatically. On Spark 3.x, AQE skew joins are the first tool;",
-        "    manual salting is for when AQE can't apply (the skew is under its thresholds, a non-join operator, or older Spark).",
+        "    manual salting is for when AQE can't apply (the skew is under its thresholds, a non-join operator, "
+        "or older Spark).",
         "- **Why the timings move less than the row counts**:",
-        f"  - `local[2]` has two cores, so balancing can speed things up at most about 2×.",
+        "  - `local[2]` has two cores, so balancing can speed things up at most about 2×.",
         f"  - At {rows:,} rows the stages take milliseconds, and fixed costs dominate.",
         f"  - The row counts show the effect directly: the busiest join task reads {jp_off['max_rows']:,} rows "
         f"plain and {js_off['max_rows']:,} salted.",
-        "  - On a cluster with dozens of executors and a skewed key of hundreds of GB, that busiest task is the job's runtime.",
+        "  - On a cluster with dozens of executors and a skewed key of hundreds of GB, that busiest task is the "
+        "job's runtime.",
         "",
         "## Plans (AQE off)",
         "",

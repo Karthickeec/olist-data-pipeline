@@ -9,6 +9,7 @@ Each day runs in one transaction:
     released on max(creation date, purchase date). These rows never change.
 After the commit, the day's synthetic address-change file is (re)written.
 """
+
 import argparse
 import sys
 from dataclasses import dataclass
@@ -82,8 +83,10 @@ class DayResult:
     changes: int = 0
 
     def __str__(self) -> str:
-        return (f"{self.day}  customers={self.customers} orders={self.orders} items={self.items} "
-                f"payments={self.payments} reviews={self.reviews} change_requests={self.changes}")
+        return (
+            f"{self.day}  customers={self.customers} orders={self.orders} items={self.items} "
+            f"payments={self.payments} reviews={self.reviews} change_requests={self.changes}"
+        )
 
 
 def _write(cur: psycopg.Cursor, query: sql.Composed, rows: list[dict], updated_at) -> int:
@@ -94,15 +97,21 @@ def _write(cur: psycopg.Cursor, query: sql.Composed, rows: list[dict], updated_a
     return cur.rowcount
 
 
-def replay_day(conn: psycopg.Connection, src: Sources, idx: ReplayIndex, day: date,
-               landing_dir: Path, address_pool: list, changes_cfg: dict) -> DayResult:
+def replay_day(
+    conn: psycopg.Connection,
+    src: Sources,
+    idx: ReplayIndex,
+    day: date,
+    landing_dir: Path,
+    address_pool: list,
+    changes_cfg: dict,
+) -> DayResult:
     stamp = end_of_day(day)
     purchased = idx.purchased_on.get(day, [])
     reviews = idx.reviews_on.get(day, [])
     # Every order a row written today points at is upserted too, so FKs hold
     # even if days are replayed out of order.
-    order_ids = sorted(set(purchased) | set(idx.changed_on.get(day, []))
-                       | {r["order_id"] for r in reviews})
+    order_ids = sorted(set(purchased) | set(idx.changed_on.get(day, [])) | {r["order_id"] for r in reviews})
     orders = [order_as_of(src.orders[oid], day) for oid in order_ids]
     customers = [src.customers[o["customer_id"]] for o in orders]
     items = [i for oid in purchased for i in src.items.get(oid, [])]
@@ -117,8 +126,12 @@ def replay_day(conn: psycopg.Connection, src: Sources, idx: ReplayIndex, day: da
         result.reviews = _write(cur, INSERT_REVIEWS, reviews, stamp)
 
     changes = generate_changes(
-        day, len(purchased), idx.known_customers(day), address_pool,
-        rate=changes_cfg["rate"], dirty_rate=changes_cfg["dirty_rate"],
+        day,
+        len(purchased),
+        idx.known_customers(day),
+        address_pool,
+        rate=changes_cfg["rate"],
+        dirty_rate=changes_cfg["dirty_rate"],
     )
     write_changes(landing_dir, day, changes)
     result.changes = len(changes)

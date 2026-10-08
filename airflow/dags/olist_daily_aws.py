@@ -13,6 +13,7 @@
 - pull_lake copies Glue's output back so the local lake keeps matching S3 (verification, teardown).
 - Same conventions as olist_daily: catchup with end_date, max_active_runs=1, created paused.
 """
+
 import os
 from datetime import datetime, timedelta
 
@@ -55,28 +56,45 @@ with DAG(
         kw = {"pool": SPARK_POOL} if spark else {}
         return BashOperator(task_id=task_id, bash_command=command, env=env, append_env=True, **kw)
 
-    api_up = PythonSensor(task_id="api_up", python_callable=api_is_up, mode="reschedule",
-                          poke_interval=30, timeout=API_WAIT_SECONDS)
+    api_up = PythonSensor(
+        task_id="api_up", python_callable=api_is_up, mode="reschedule", poke_interval=30, timeout=API_WAIT_SECONDS
+    )
     replay = local("replay", job("replay.py", "--date {{ ds }}"))
-    bronze = [local("bronze_postgres", job("postgres_to_bronze.py", "--date {{ ds }}"), spark=True),
-              local("bronze_files", job("files_to_bronze.py", "--date {{ ds }}"), spark=True),
-              local("bronze_api", job("api_to_bronze.py", "--date {{ ds }}"), spark=True)]
+    bronze = [
+        local("bronze_postgres", job("postgres_to_bronze.py", "--date {{ ds }}"), spark=True),
+        local("bronze_files", job("files_to_bronze.py", "--date {{ ds }}"), spark=True),
+        local("bronze_api", job("api_to_bronze.py", "--date {{ ds }}"), spark=True),
+    ]
     dq_bronze = local("dq_bronze", job("dq.py", "--layer bronze --date {{ ds }}"), spark=True)
     publish = local("publish_bronze", job("aws.py", "publish"))
 
     def on_glue(task: str) -> list:
         export = local(f"export_{task}", job("glue_run.py", f"export {task} --date {{{{ ds }}}}"))
         run = GlueJobOperator(
-            task_id=f"glue_{task}", job_name=GLUE_JOB, region_name=REGION, update_config=False,
+            task_id=f"glue_{task}",
+            job_name=GLUE_JOB,
+            region_name=REGION,
+            update_config=False,
             # The job derives its control prefix from its --LAKE default: no bucket name in Airflow.
             script_args={"--TASK": task, "--DATE": "{{ ds }}"},
-            wait_for_completion=True, job_poll_interval=15, verbose=False,
+            wait_for_completion=True,
+            job_poll_interval=15,
+            verbose=False,
             # A run that just SUCCEEDED briefly still counts against MaxConcurrentRuns=1, so the next
             # StartJobRun failed with ConcurrentRunsExceeded: wait 30 s before returning; retries stay as a net.
             sleep_before_return=30,
-            retries=3, retry_delay=timedelta(seconds=30), retry_exponential_backoff=False)
-        imp = local(f"import_{task}", job("glue_run.py", f"import {task} --date {{{{ ds }}}}",
-                                          f"--run-id {{{{ ti.xcom_pull(task_ids='glue_{task}') }}}}"))
+            retries=3,
+            retry_delay=timedelta(seconds=30),
+            retry_exponential_backoff=False,
+        )
+        imp = local(
+            f"import_{task}",
+            job(
+                "glue_run.py",
+                f"import {task} --date {{{{ ds }}}}",
+                f"--run-id {{{{ ti.xcom_pull(task_ids='glue_{task}') }}}}",
+            ),
+        )
         return [export, run, imp]
 
     steps = [on_glue(t) for t in ("silver", "dq_silver", "gold", "dq_gold")]

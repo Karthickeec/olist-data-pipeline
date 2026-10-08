@@ -3,6 +3,7 @@
 The DDL is generated from each table's actual Parquet schema (so it can't drift from the files)
 and stored in sql/athena/ with a {{LAKE}} placeholder: the bucket name is filled in at run time.
 """
+
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +20,8 @@ PROJECTION_RANGE = "2016-09-01,2018-12-31"
 
 @dataclass(frozen=True)
 class LakeTable:
-    name: str            # Glue table name
-    path: str            # relative to the lake root
+    name: str  # Glue table name
+    path: str  # relative to the lake root
     partition: str | None = None
 
     @property
@@ -29,22 +30,48 @@ class LakeTable:
 
 
 def _tables() -> tuple[LakeTable, ...]:
-    pg = ("orders", "order_items", "order_payments", "order_reviews", "customers", "products", "sellers",
-          "geolocation", "product_category_name_translation")
-    silver = {"orders": "order_purchase_date", "order_items": "order_purchase_date",
-              "order_payments": "order_purchase_date", "order_reviews": "review_date", "customers": None,
-              "products": None, "sellers": None, "geolocation": None, "customer_changes": "requested_date",
-              "customer_activity": "activity_date", "order_lines": "order_purchase_date"}
-    gold = {"dim_date": None, "dim_product": None, "dim_seller": None, "dim_customer": None,
-            "fact_order_lines": "order_purchase_date", "agg_daily_category_sales": "order_purchase_date",
-            "customer_metrics": "as_of_date"}
+    pg = (
+        "orders",
+        "order_items",
+        "order_payments",
+        "order_reviews",
+        "customers",
+        "products",
+        "sellers",
+        "geolocation",
+        "product_category_name_translation",
+    )
+    silver = {
+        "orders": "order_purchase_date",
+        "order_items": "order_purchase_date",
+        "order_payments": "order_purchase_date",
+        "order_reviews": "review_date",
+        "customers": None,
+        "products": None,
+        "sellers": None,
+        "geolocation": None,
+        "customer_changes": "requested_date",
+        "customer_activity": "activity_date",
+        "order_lines": "order_purchase_date",
+    }
+    gold = {
+        "dim_date": None,
+        "dim_product": None,
+        "dim_seller": None,
+        "dim_customer": None,
+        "fact_order_lines": "order_purchase_date",
+        "agg_daily_category_sales": "order_purchase_date",
+        "customer_metrics": "as_of_date",
+    }
     return (
         *(LakeTable(f"bronze_{t}", f"bronze/olist_postgres/{t}", "ingest_date") for t in pg),
         LakeTable("bronze_customer_changes", "bronze/crm/customer_changes", "ingest_date"),
         LakeTable("bronze_customer_activity", "bronze/api/customer_activity", "ingest_date"),
         *(LakeTable(f"silver_{t}", f"silver/{t}", p) for t, p in silver.items()),
-        *(LakeTable(f"silver_quarantine_{t}", f"silver/_quarantine/{t}", "batch_date")
-          for t in ("customer_changes", "customer_activity")),
+        *(
+            LakeTable(f"silver_quarantine_{t}", f"silver/_quarantine/{t}", "batch_date")
+            for t in ("customer_changes", "customer_activity")
+        ),
         *(LakeTable(f"gold_{t}", f"gold/{t}", p) for t, p in gold.items()),
     )
 
@@ -98,8 +125,8 @@ class Athena:
 
     def run(self, sql: str) -> dict:
         qid = self.client.start_query_execution(
-            QueryString=sql, WorkGroup=self.workgroup,
-            QueryExecutionContext={"Database": self.database})["QueryExecutionId"]
+            QueryString=sql, WorkGroup=self.workgroup, QueryExecutionContext={"Database": self.database}
+        )["QueryExecutionId"]
         while True:
             ex = self.client.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
             state = ex["Status"]["State"]
@@ -108,8 +135,11 @@ class Athena:
             time.sleep(self.poll)
         if state != "SUCCEEDED":
             raise RuntimeError(f"Athena query {qid} {state}: {ex['Status'].get('StateChangeReason', '')}")
-        return {"id": qid, "bytes": ex["Statistics"].get("DataScannedInBytes", 0),
-                "ms": ex["Statistics"].get("EngineExecutionTimeInMillis", 0)}
+        return {
+            "id": qid,
+            "bytes": ex["Statistics"].get("DataScannedInBytes", 0),
+            "ms": ex["Statistics"].get("EngineExecutionTimeInMillis", 0),
+        }
 
     def rows(self, sql: str) -> tuple[list[tuple], dict]:
         """Run a query and return (rows as tuples of strings, stats). Header row dropped."""

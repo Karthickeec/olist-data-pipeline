@@ -1,9 +1,9 @@
 from datetime import date, datetime
 from pathlib import Path
 
+from conftest import assert_same_rows
 from pyspark.sql import functions as F
 
-from conftest import assert_same_rows
 from olist_pipeline.config import PROJECT_ROOT, resolve_uri
 from olist_pipeline.lake import partition_path, table_path, write_partition
 from olist_pipeline.watermarks import Window
@@ -23,7 +23,8 @@ def test_window_predicate():
     high = datetime(2017, 3, 2, 23, 59, 59)
     assert Window(None, high).predicate() == "updated_at <= TIMESTAMP '2017-03-02 23:59:59'"
     assert Window(datetime(2017, 3, 1, 23, 59, 59), high).predicate() == (
-        "updated_at > TIMESTAMP '2017-03-01 23:59:59' AND updated_at <= TIMESTAMP '2017-03-02 23:59:59'")
+        "updated_at > TIMESTAMP '2017-03-01 23:59:59' AND updated_at <= TIMESTAMP '2017-03-02 23:59:59'"
+    )
 
 
 def _df(spark, rows):
@@ -34,11 +35,20 @@ def test_metadata_columns(spark, tmp_path):
     out = str(tmp_path / "t")
     assert write_partition(spark, _df(spark, [(1, "a")]), out, D1, "test:src", RUN) == 1
     # Format inside Spark (UTC session): collect() would convert timestamps to the local zone.
-    row = (spark.read.parquet(out)
-           .withColumn("_ingested_at", F.date_format("_ingested_at", "yyyy-MM-dd HH:mm:ss"))
-           .first().asDict())
-    assert row == {"id": 1, "name": "a", "_ingested_at": "2026-10-08 12:00:00", "_batch_date": D1,
-                   "_source": "test:src", "ingest_date": D1}
+    row = (
+        spark.read.parquet(out)
+        .withColumn("_ingested_at", F.date_format("_ingested_at", "yyyy-MM-dd HH:mm:ss"))
+        .first()
+        .asDict()
+    )
+    assert row == {
+        "id": 1,
+        "name": "a",
+        "_ingested_at": "2026-10-08 12:00:00",
+        "_batch_date": D1,
+        "_source": "test:src",
+        "ingest_date": D1,
+    }
     assert (Path(out) / "ingest_date=2017-03-01").is_dir()
 
 

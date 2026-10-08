@@ -1,4 +1,5 @@
 """SparkSession and JDBC settings from config/pipeline.yaml."""
+
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ def build_spark(cfg: dict, app_name: str = "olist-pipeline", extra_conf: dict | 
     packages = [s["jdbc_package"]]
     if cfg["lake"]["root"].startswith("s3a://"):
         from olist_pipeline.aws import HADOOP_AWS_PACKAGES, s3a_conf
+
         packages += HADOOP_AWS_PACKAGES
         extra_conf = {**s3a_conf(cfg["aws"]["region"]), **(extra_conf or {})}
     for k, v in (extra_conf or {}).items():

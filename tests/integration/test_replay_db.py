@@ -1,8 +1,10 @@
 """Replay against a real Postgres, in a throwaway schema (olist_test)."""
+
 from datetime import date
 
 import psycopg
 import pytest
+from conftest import require_raw_csvs
 
 from olist_pipeline.config import load_config
 from olist_pipeline.db import apply_schema, connect
@@ -19,6 +21,7 @@ SCHEMA = "olist_test"
 @pytest.fixture(scope="module")
 def cfg():
     cfg = load_config()
+    require_raw_csvs(cfg["paths"]["raw_dir"])
     cfg["pg"]["schema"] = SCHEMA
     return cfg
 
@@ -55,7 +58,9 @@ def replay(cfg, conn, tmp_path_factory):
 
 def test_reseed_inserts_nothing(conn, cfg):
     assert seed_reference(conn, cfg["paths"]["raw_dir"], tables=("products", "sellers")) == {
-        "products": (32951, 0), "sellers": (3095, 0)}
+        "products": (32951, 0),
+        "sellers": (3095, 0),
+    }
 
 
 def test_rerunning_days_changes_nothing(conn, replay):
@@ -73,9 +78,13 @@ def test_rerunning_days_changes_nothing(conn, replay):
 def test_older_day_cannot_overwrite_newer_state(conn, replay):
     order_id, status_before, updated_before = conn.execute(
         "SELECT order_id, order_status, updated_at FROM orders "
-        "WHERE order_status = 'delivered' ORDER BY order_id LIMIT 1").fetchone()
+        "WHERE order_status = 'delivered' ORDER BY order_id LIMIT 1"
+    ).fetchone()
     purchased = conn.execute(
-        "SELECT order_purchase_timestamp::date FROM orders WHERE order_id = %s", (order_id,)).fetchone()[0]
+        "SELECT order_purchase_timestamp::date FROM orders WHERE order_id = %s", (order_id,)
+    ).fetchone()[0]
     replay(purchased)
-    assert conn.execute("SELECT order_status, updated_at FROM orders WHERE order_id = %s",
-                        (order_id,)).fetchone() == (status_before, updated_before)
+    assert conn.execute("SELECT order_status, updated_at FROM orders WHERE order_id = %s", (order_id,)).fetchone() == (
+        status_before,
+        updated_before,
+    )

@@ -6,6 +6,7 @@ CONTROL/state.json (exported from the local Postgres), where CONTROL = s3://<lak
 so callers (Airflow) only pass task and date; what the job records goes to CONTROL/output.json and is
 imported locally afterwards.
 """
+
 import json
 import sys
 import tempfile
@@ -41,10 +42,13 @@ def write_json(uri: str, data: dict) -> None:
 
 spark = SparkSession.builder.getOrCreate()
 # The same runtime settings as olist_pipeline.spark.build_spark (Glue owns the SparkContext).
-for k, v in {"spark.sql.session.timeZone": "UTC", "spark.sql.shuffle.partitions": "4",
-             "spark.sql.sources.partitionOverwriteMode": "dynamic",
-             "spark.sql.parquet.outputTimestampType": "TIMESTAMP_MICROS",
-             "spark.sql.legacy.timeParserPolicy": "CORRECTED"}.items():
+for k, v in {
+    "spark.sql.session.timeZone": "UTC",
+    "spark.sql.shuffle.partitions": "4",
+    "spark.sql.sources.partitionOverwriteMode": "dynamic",
+    "spark.sql.parquet.outputTimestampType": "TIMESTAMP_MICROS",
+    "spark.sql.legacy.timeParserPolicy": "CORRECTED",
+}.items():
     spark.conf.set(k, v)
 
 control = f"s3://{split(lake)[0]}/control/{task}/{day.isoformat()}"
@@ -54,14 +58,17 @@ t0, summary = time.time(), {}
 
 if task == "silver":
     from olist_pipeline.silver.job import SilverJob
+
     runs = SilverJob(spark, cfg, book, day).run()
     summary = {t: r.rows_written for t, r in runs.items()}
 elif task == "gold":
     from olist_pipeline.gold.job import GoldJob
+
     GoldJob(spark, cfg, book, day).run()
 elif task.startswith("dq_"):
     from olist_pipeline.dq.engine import Runner, record, report
     from olist_pipeline.dq.suite import load_suite
+
     layer = task[3:]
     bucket, prefix = split(args["SUITES"].rstrip("/"))
     suite_path = Path(tempfile.mkdtemp()) / f"{layer}.yaml"
@@ -73,7 +80,12 @@ elif task.startswith("dq_"):
 else:
     raise SystemExit(f"unknown task {task}")
 
-out = {**book.outputs(), "task": task, "summary": summary, "seconds": round(time.time() - t0, 1),
-       "spark_version": spark.version}
+out = {
+    **book.outputs(),
+    "task": task,
+    "summary": summary,
+    "seconds": round(time.time() - t0, 1),
+    "spark_version": spark.version,
+}
 write_json(f"{control}/output.json", out)
 print(json.dumps({k: out[k] for k in ("task", "batch_date", "summary", "seconds", "spark_version")}))

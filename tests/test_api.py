@@ -4,13 +4,21 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from olist_pipeline.api.activity import activity_record, active_customers
+from olist_pipeline.api.activity import active_customers, activity_record
 from olist_pipeline.api.app import ServerSettings, create_app
 
 KEY = "test-key"
 DAY = date(2018, 3, 1)
-FIELDS = {"customer_unique_id", "activity_date", "sessions", "page_views", "cart_adds",
-          "support_tickets", "last_seen_at", "device"}
+FIELDS = {
+    "customer_unique_id",
+    "activity_date",
+    "sessions",
+    "page_views",
+    "cart_adds",
+    "support_tickets",
+    "last_seen_at",
+    "device",
+}
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +74,7 @@ def test_invalid_parameters_give_422(client, params):
 def test_same_date_is_deterministic(client, activity_index):
     _, records = all_records(client, page_size=100)
     fresh = TestClient(create_app(activity_index, KEY, ServerSettings()))
-    _, again = all_records(fresh, page_size=37)   # different paging, same data
+    _, again = all_records(fresh, page_size=37)  # different paging, same data
     assert again == records
 
 
@@ -81,15 +89,16 @@ def test_only_customers_who_had_ordered(client, activity_index):
 
 
 def test_volume_is_a_few_hundred_per_day(activity_index):
-    counts = [len(active_customers(activity_index, date(2017, 9, 1) + timedelta(days=7 * i)))
-              for i in range(12)]
+    counts = [len(active_customers(activity_index, date(2017, 9, 1) + timedelta(days=7 * i))) for i in range(12)]
     assert all(150 <= n <= 600 for n in counts), counts
 
 
 def test_dirty_records_about_one_percent(activity_index):
-    records = [activity_record(d, c, 0.01)
-               for d in (date(2018, 1, 1) + timedelta(days=i) for i in range(20))
-               for c in active_customers(activity_index, d)]
+    records = [
+        activity_record(d, c, 0.01)
+        for d in (date(2018, 1, 1) + timedelta(days=i) for i in range(20))
+        for c in active_customers(activity_index, d)
+    ]
     kinds = Counter()
     for r in records:
         if set(r) != FIELDS:
@@ -114,7 +123,7 @@ def test_injected_429_has_retry_after(activity_index):
     app = TestClient(create_app(activity_index, KEY, ServerSettings(rate_limit_rate=1.0, retry_after_seconds=3)))
     resp = get(app)
     assert resp.status_code == 429 and resp.headers["Retry-After"] == "3"
-    assert get(app, key=None).status_code == 401   # auth is checked before failures
+    assert get(app, key=None).status_code == 401  # auth is checked before failures
 
 
 def test_injected_500(activity_index):

@@ -1,9 +1,15 @@
 # Olist e-commerce pipeline
 
+[![CI](https://github.com/Karthickeec/olist-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Karthickeec/olist-data-pipeline/actions/workflows/ci.yml)
+
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/Athena/Glue/Secrets Manager, Parquet, Bronze/Silver/Gold layers.
 
-**Status: steps 1–9 done (sources, Bronze, Silver, DQ, Gold, Airflow locally; S3 + Athena + Secrets Manager + Spark on Glue in AWS). Step 10 (CI and docs) is planned in [docs/PLAN.md](docs/PLAN.md).**
+**Status: all 10 steps done.** Sources, Bronze, Silver, DQ, Gold and Airflow locally; S3, Athena, Secrets Manager
+and Spark on Glue in AWS; CI on GitHub Actions. See [docs/PLAN.md](docs/PLAN.md) for each step's numbers.
+
+Docs: [Architecture](docs/ARCHITECTURE.md) · [Design decisions](docs/DECISIONS.md) · [Runbook](docs/RUNBOOK.md)
+(rerun, backfill, failures, AWS teardown) · [Salting](docs/SALTING.md) · [Small files](docs/SMALL_FILES.md)
 
 **AWS region: `ap-southeast-2`.** The AWS account is on the Free plan, and its organization's service control
 policy allows only the project's home region (ap-southeast-2); every other region, and EMR everywhere, is denied.
@@ -558,10 +564,35 @@ so their ETag is `md5(md5(file))-1`, not the file's MD5. Keys and sizes matched 
 **Why not Glue for Bronze too:** Bronze reads the local Postgres (JDBC), the local landing files and the
 local mock API. Moving it would mean RDS and a hosted API: more cost and setup for no change in the Spark logic.
 
+## Known limitations
+
+- **Small files.** Silver/Gold event tables are partitioned by day, so files are 4–43 KB (about 380 per table).
+  Monthly partitions cut the fact table to 16 files and Athena's full scan from 1.40 s to 0.47 s
+  ([SMALL_FILES.md](docs/SMALL_FILES.md)), but the pipeline still writes daily partitions. Fix: monthly partitions
+  or Iceberg with compaction.
+- **No ACID on Parquet.** Silver/Gold merges are a staging write plus a partition-directory swap. A reader
+  during the swap can see a partition missing, and on S3 the swap is a copy. Reruns repair an interrupted swap.
+  Upgrade path: Apache Iceberg on the Glue catalog (`MERGE INTO`, snapshots, time travel).
+- **Query-based CDC.** Hard deletes are invisible, only the last version of a row per batch window is seen,
+  and rerunning an older day for orders after later days moves rows that changed later to the later
+  partition (nothing is lost; see "Known limitation: reruns of older days for mutable tables").
+- **Local sources and Bronze.** Postgres, the CRM files and the mock API are local, so Bronze always runs on
+  the laptop; Glue runs Silver/Gold only. Moving Bronze needs RDS (or a reachable database) and a hosted API.
+- **Bookkeeping through JSON on Glue.** The control state is exported before and imported after each Glue
+  run; if an import step is skipped, Postgres doesn't know about that run (rerun the import or the task).
+- **Local compute against S3 is impractical from here.** About 0.4 s per S3 round trip to Sydney; local
+  Spark on `s3a://` paths is only for small checks.
+- **Single-machine Airflow.** Standalone with SQLite and the LocalExecutor: no HA, one Spark task at a time
+  (pool `spark` with 1 slot). Fine for a daily batch on one laptop; MWAA or a managed scheduler otherwise.
+- **One region, no EMR.** The Free-plan account's SCP allows only ap-southeast-2 and denies EMR/EMR Serverless.
+- **CI runs without the Kaggle CSVs.** They aren't in the repo (license and size), so 32 CSV-dependent tests
+  skip on GitHub Actions; all 118 run locally.
+
 ## Layout
 
 ```
-docs/                    PLAN.md, SALTING.md, SMALL_FILES.md
+docs/                    PLAN.md, ARCHITECTURE.md, DECISIONS.md, RUNBOOK.md, SALTING.md, SMALL_FILES.md
+.github/workflows/       ci.yml (ruff + pytest with Java 17 and Postgres 16)
 infra/                   step8.yaml (CloudFormation), glue_job.py (Glue entry point), glue_test_job.py
 airflow/dags/            olist_daily (local), olist_daily_aws (Glue), olist_common (shared helpers);
                          the rest of airflow/ is local state, gitignored

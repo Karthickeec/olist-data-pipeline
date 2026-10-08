@@ -3,14 +3,27 @@ from datetime import date, datetime
 import pytest
 
 from olist_pipeline.replay_logic import (
-    build_index, change_days, end_of_day, order_as_of, review_release_day,
+    build_index,
+    change_days,
+    end_of_day,
+    order_as_of,
+    review_release_day,
 )
 from olist_pipeline.sources import Sources
 
 
-def order(status="delivered", purchase="2017-03-01 10:00:00", approved=None, carrier=None,
-          delivered=None, order_id="o1", customer_id="c1"):
-    ts = lambda s: datetime.fromisoformat(s) if s else None
+def order(
+    status="delivered",
+    purchase="2017-03-01 10:00:00",
+    approved=None,
+    carrier=None,
+    delivered=None,
+    order_id="o1",
+    customer_id="c1",
+):
+    def ts(s):
+        return datetime.fromisoformat(s) if s else None
+
     return {
         "order_id": order_id,
         "customer_id": customer_id,
@@ -27,8 +40,7 @@ D = date.fromisoformat
 
 
 def test_delivered_order_walks_through_statuses():
-    o = order(approved="2017-03-01 10:15:00", carrier="2017-03-03 09:00:00",
-              delivered="2017-03-08 18:00:00")
+    o = order(approved="2017-03-01 10:15:00", carrier="2017-03-03 09:00:00", delivered="2017-03-08 18:00:00")
     seen = {d: order_as_of(o, D(d)) for d in ("2017-03-01", "2017-03-02", "2017-03-03", "2017-03-08")}
     assert seen["2017-03-01"]["order_status"] == "approved"
     assert seen["2017-03-01"]["order_delivered_carrier_date"] is None
@@ -39,8 +51,7 @@ def test_delivered_order_walks_through_statuses():
 
 
 def test_purchase_day_without_approval_is_created():
-    o = order(approved="2017-03-02 08:00:00", carrier="2017-03-04 08:00:00",
-              delivered="2017-03-09 08:00:00")
+    o = order(approved="2017-03-02 08:00:00", carrier="2017-03-04 08:00:00", delivered="2017-03-09 08:00:00")
     assert order_as_of(o, D("2017-03-01"))["order_status"] == "created"
 
 
@@ -50,8 +61,7 @@ def test_estimated_delivery_is_known_from_purchase():
 
 
 def test_carrier_before_approval_shows_shipped_without_approval():
-    o = order(approved="2017-03-05 08:00:00", carrier="2017-03-03 08:00:00",
-              delivered="2017-03-10 08:00:00")
+    o = order(approved="2017-03-05 08:00:00", carrier="2017-03-03 08:00:00", delivered="2017-03-10 08:00:00")
     visible = order_as_of(o, D("2017-03-03"))
     assert visible["order_status"] == "shipped"
     assert visible["order_approved_at"] is None
@@ -82,8 +92,7 @@ def test_order_without_milestones_shows_final_status_immediately():
 
 
 def test_change_days():
-    o = order(approved="2017-03-01 23:00:00", carrier="2017-03-03 08:00:00",
-              delivered="2017-03-03 18:00:00")
+    o = order(approved="2017-03-01 23:00:00", carrier="2017-03-03 08:00:00", delivered="2017-03-03 18:00:00")
     assert change_days(o) == {D("2017-03-01"), D("2017-03-03")}
 
 
@@ -110,7 +119,8 @@ def test_build_index():
             "c3": {"customer_unique_id": "p1"},  # same person, second order
         },
         orders={"o1": o1, "o2": o2, "o3": o3},
-        items={}, payments={},
+        items={},
+        payments={},
         reviews=[{"order_id": "o1", "review_creation_date": datetime(2017, 3, 6)}],
     )
     idx = build_index(src)

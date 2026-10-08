@@ -6,6 +6,7 @@
 Record fields are read as strings, exactly as sent; pages that are not valid JSON are kept as
 a single row with _corrupt_record.
 """
+
 import logging
 import os
 import sys
@@ -25,13 +26,23 @@ from olist_pipeline.spark import build_spark
 SOURCE = "api"
 TABLE = "customer_activity"
 CORRUPT = "_corrupt_record"
-RECORD_FIELDS = ("customer_unique_id", "activity_date", "sessions", "page_views", "cart_adds",
-                 "support_tickets", "last_seen_at", "device")
-PAGE_SCHEMA = StructType([
-    StructField("page", LongType()),
-    StructField("data", ArrayType(StructType([StructField(f, StringType()) for f in RECORD_FIELDS]))),
-    StructField(CORRUPT, StringType()),
-])
+RECORD_FIELDS = (
+    "customer_unique_id",
+    "activity_date",
+    "sessions",
+    "page_views",
+    "cart_adds",
+    "support_tickets",
+    "last_seen_at",
+    "device",
+)
+PAGE_SCHEMA = StructType(
+    [
+        StructField("page", LongType()),
+        StructField("data", ArrayType(StructType([StructField(f, StringType()) for f in RECORD_FIELDS]))),
+        StructField(CORRUPT, StringType()),
+    ]
+)
 
 
 def make_client(cfg: dict, http: httpx.Client | None = None, **overrides) -> ActivityClient:
@@ -40,9 +51,15 @@ def make_client(cfg: dict, http: httpx.Client | None = None, **overrides) -> Act
     if not api_key:
         raise SystemExit(f"{api['key_env']} is not set (and no api.key secret is configured)")
     http = http or httpx.Client(base_url=api["base_url"], timeout=api["timeout_seconds"])
-    return ActivityClient(http, api_key, page_size=api["page_size"], max_attempts=api["max_attempts"],
-                          backoff_base=api["backoff_base_seconds"], backoff_max=api["backoff_max_seconds"],
-                          **overrides)
+    return ActivityClient(
+        http,
+        api_key,
+        page_size=api["page_size"],
+        max_attempts=api["max_attempts"],
+        backoff_base=api["backoff_base_seconds"],
+        backoff_max=api["backoff_max_seconds"],
+        **overrides,
+    )
 
 
 def fetch_and_land(client: ActivityClient, cfg: dict, batch_date: date) -> FetchStats:
@@ -64,8 +81,7 @@ def load_to_bronze(spark: SparkSession, cfg: dict, batch_date: date, ingested_at
         .withColumn("_source_file", F.col("_metadata.file_path"))
     )
     records = (
-        pages.select(F.explode_outer("data").alias("r"), F.col("page").alias("_page"),
-                     "_source_file", CORRUPT)
+        pages.select(F.explode_outer("data").alias("r"), F.col("page").alias("_page"), "_source_file", CORRUPT)
         # explode_outer keeps unparseable pages (data is null); drop the null row of empty pages.
         .filter(F.col("r").isNotNull() | F.col(CORRUPT).isNotNull())
         .select(*[F.col(f"r.{f}").alias(f) for f in RECORD_FIELDS], "_page", "_source_file", CORRUPT)
@@ -92,15 +108,21 @@ def main(argv=None) -> None:
             result = load_to_bronze(spark, cfg, day, utc_now())
             s = stats[day]
             print(result, flush=True)
-            print(f"api_to_bronze {day}: pages={s.pages} records={s.records} retries={s.retries} "
-                  f"total_wait={s.wait_seconds:.1f}s bronze_rows={result.rows}", flush=True)
+            print(
+                f"api_to_bronze {day}: pages={s.pages} records={s.records} retries={s.retries} "
+                f"total_wait={s.wait_seconds:.1f}s bronze_rows={result.rows}",
+                flush=True,
+            )
     finally:
         spark.stop()
     if len(days) > 1:
-        print(f"api_to_bronze {days[0]}..{days[-1]}: {len(days)} days, "
-              f"pages={sum(s.pages for s in stats.values())} records={sum(s.records for s in stats.values())} "
-              f"retries={sum(s.retries for s in stats.values())} "
-              f"total_wait={sum(s.wait_seconds for s in stats.values()):.1f}s", flush=True)
+        print(
+            f"api_to_bronze {days[0]}..{days[-1]}: {len(days)} days, "
+            f"pages={sum(s.pages for s in stats.values())} records={sum(s.records for s in stats.values())} "
+            f"retries={sum(s.retries for s in stats.values())} "
+            f"total_wait={sum(s.wait_seconds for s in stats.values()):.1f}s",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

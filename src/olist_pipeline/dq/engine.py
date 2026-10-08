@@ -4,6 +4,7 @@ Table names map to lake paths: bronze.<source>.<table>, silver.<table>, gold.<ta
 Scopes: batch (rows of this batch), latest (the newest Bronze partition on or before the
 batch, for snapshot tables), table (everything up to the batch).
 """
+
 import argparse
 import json
 import sys
@@ -11,8 +12,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession
 from pyspark.errors import AnalysisException
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from olist_pipeline.config import load_config
@@ -28,7 +29,7 @@ from olist_pipeline.watermarks import Bookkeeping
 class Result:
     table: str
     check: Check
-    status: str                     # pass | fail | warn | error_running | skipped
+    status: str  # pass | fail | warn | error_running | skipped
     outcome: C.CheckOutcome
 
     @property
@@ -69,7 +70,7 @@ class Runner:
         col = self.suite.batch_column
         day = F.lit(self.batch_date.isoformat()).cast("date")
         if col not in df.columns:
-            if scope == "table":            # e.g. dimensions rebuilt whole: no batch column
+            if scope == "table":  # e.g. dimensions rebuilt whole: no batch column
                 return df
             raise C.ColumnMissing(f"batch column {col!r} not in table")
         if scope == "batch":
@@ -117,8 +118,14 @@ class Runner:
                 try:
                     outcome = self.run_check(tc, df, check)
                 except Exception as e:  # noqa: BLE001 - recorded as error_running, which fails the run
-                    results.append(Result(tc.name, check, "error_running",
-                                          C.CheckOutcome(message=f"{type(e).__name__}: {str(e).splitlines()[0]}")))
+                    results.append(
+                        Result(
+                            tc.name,
+                            check,
+                            "error_running",
+                            C.CheckOutcome(message=f"{type(e).__name__}: {str(e).splitlines()[0]}"),
+                        )
+                    )
                     continue
                 failed = outcome.failed if outcome.failed is not None else outcome.failed_rows > 0
                 status = "pass" if not failed else ("fail" if check.severity == "error" else "warn")
@@ -129,10 +136,25 @@ class Runner:
 
 def record(book, layer: str, batch_date: date, results: list[Result], tables: set[str]) -> None:
     """Replace this batch's results for the tables that ran."""
-    book.record_dq(layer, batch_date, [
-        (r.table, r.check.name, r.check.type, r.check.severity, r.status, r.outcome.failed_rows, r.outcome.observed,
-         json.dumps(r.outcome.sample, default=str) if r.outcome.sample else None, r.outcome.message or None)
-        for r in results], tables)
+    book.record_dq(
+        layer,
+        batch_date,
+        [
+            (
+                r.table,
+                r.check.name,
+                r.check.type,
+                r.check.severity,
+                r.status,
+                r.outcome.failed_rows,
+                r.outcome.observed,
+                json.dumps(r.outcome.sample, default=str) if r.outcome.sample else None,
+                r.outcome.message or None,
+            )
+            for r in results
+        ],
+        tables,
+    )
 
 
 def report(results: list[Result], layer: str, batch_date: date) -> None:
@@ -144,13 +166,22 @@ def report(results: list[Result], layer: str, batch_date: date) -> None:
         print(f"  {r.status.upper():<13} {r.check.severity:<5} {r.table:<36} {r.check.name:<48} {detail}")
     counts = {s: sum(r.status == s for r in results) for s in ("pass", "warn", "fail", "error_running", "skipped")}
     blocking = sum(r.blocking for r in results)
-    print(f"DQ {layer} {batch_date}: {len(results)} checks, "
-          + ", ".join(f"{k}={v}" for k, v in counts.items() if v)
-          + (f" -> FAILED ({blocking} blocking)" if blocking else " -> OK"), flush=True)
+    print(
+        f"DQ {layer} {batch_date}: {len(results)} checks, "
+        + ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+        + (f" -> FAILED ({blocking} blocking)" if blocking else " -> OK"),
+        flush=True,
+    )
 
 
-def run_layer(spark: SparkSession, cfg: dict, layer: str, batch_date: date, suite: Suite | None = None,
-              only: set[str] | None = None) -> list[Result]:
+def run_layer(
+    spark: SparkSession,
+    cfg: dict,
+    layer: str,
+    batch_date: date,
+    suite: Suite | None = None,
+    only: set[str] | None = None,
+) -> list[Result]:
     suite = suite or load_suite(layer)
     with connect(cfg["pg"]) as conn:
         book = Bookkeeping(conn, cfg["pg"]["pipeline_schema"])
@@ -173,8 +204,9 @@ def main(argv=None) -> None:
     args = p.parse_args(argv)
     if (args.start is None) != (args.end is None):
         p.error("--start and --end go together")
-    days = [args.date] if args.date else [args.start + timedelta(days=i)
-                                          for i in range((args.end - args.start).days + 1)]
+    days = (
+        [args.date] if args.date else [args.start + timedelta(days=i) for i in range((args.end - args.start).days + 1)]
+    )
     cfg = load_config()
     spark = build_spark(cfg, f"dq_{args.layer}")
     suite = load_suite(args.layer, args.suite)

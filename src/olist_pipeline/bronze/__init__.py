@@ -1,13 +1,14 @@
 """Bronze ingestion: raw source data to Parquet, with ingestion metadata, no cleaning."""
+
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 
 @dataclass
 class TableResult:
     table: str
-    action: str   # "written" or "skipped"
+    action: str  # "written" or "skipped"
     rows: int
     detail: str = ""
 
@@ -17,7 +18,7 @@ class TableResult:
 
 def utc_now() -> datetime:
     """Run timestamp for _ingested_at (naive UTC, matching the Spark session time zone)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def parse_batch_date(argv=None, description: str = "") -> date:

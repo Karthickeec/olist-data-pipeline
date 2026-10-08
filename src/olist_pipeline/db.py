@@ -1,4 +1,5 @@
 """Postgres connection and schema helpers."""
+
 import re
 from pathlib import Path
 
@@ -18,8 +19,11 @@ def connect(pg: dict) -> psycopg.Connection:
     """
     schema = check_identifier(pg["schema"])
     return psycopg.connect(
-        host=pg["host"], port=pg["port"], dbname=pg["dbname"],
-        user=pg["user"], password=pg["password"],
+        host=pg["host"],
+        port=pg["port"],
+        dbname=pg["dbname"],
+        user=pg["user"],
+        password=pg["password"],
         options=f"-c search_path={schema}",
         autocommit=True,
     )

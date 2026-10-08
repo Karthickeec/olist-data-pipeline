@@ -13,6 +13,7 @@ dependencies never mix with PySpark/FastAPI. {{ ds }} is the business day proces
 - Retries with exponential backoff; the API task's own HTTP retries come first.
 - api_up waits (reschedule mode, no worker slot held) instead of failing when the API is down.
 """
+
 import os
 from datetime import datetime, timedelta
 
@@ -20,8 +21,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import DAG
 
-from olist_common import (API_WAIT_SECONDS, RETRY_DELAY_SECONDS, SPARK_POOL, api_is_up, job, on_failure,
-                          on_retry)
+from olist_common import API_WAIT_SECONDS, RETRY_DELAY_SECONDS, SPARK_POOL, api_is_up, job, on_failure, on_retry
 
 # The simulated history ends on 2018-10-17. Unpausing the DAG catches up to END_DATE one day at a
 # time; set OLIST_DAG_END_DATE to stop earlier (e.g. a 5-day demo).
@@ -54,8 +54,9 @@ with DAG(
 ) as dag:
     env = {"OLIST_API_KEY": os.environ.get("OLIST_API_KEY", "dev-local-key")}
 
-    api_up = PythonSensor(task_id="api_up", python_callable=api_is_up, mode="reschedule",
-                          poke_interval=30, timeout=API_WAIT_SECONDS)
+    api_up = PythonSensor(
+        task_id="api_up", python_callable=api_is_up, mode="reschedule", poke_interval=30, timeout=API_WAIT_SECONDS
+    )
     replay = BashOperator(task_id="replay", bash_command=job("replay.py", "--date {{ ds }}"))
 
     def spark_task(task_id: str, command: str) -> BashOperator:

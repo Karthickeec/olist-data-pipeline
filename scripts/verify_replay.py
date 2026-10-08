@@ -1,8 +1,9 @@
 """Verify the replay.
 
-  full                     every table matches its CSV exactly (run after `replay.py --all`)
-  idempotency --date D...  rerunning the given days changes no table and no landing file
+full                     every table matches its CSV exactly (run after `replay.py --all`)
+idempotency --date D...  rerunning the given days changes no table and no landing file
 """
+
 import argparse
 import sys
 from datetime import date

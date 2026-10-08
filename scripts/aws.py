@@ -11,6 +11,7 @@
 
 Credentials come from the default chain (AWS profile); secret values are never printed.
 """
+
 import argparse
 import json
 import os
@@ -35,13 +36,13 @@ PIPELINE_ENTRY = PROJECT_ROOT / "infra" / "glue_job.py"
 DQ_SUITES = PROJECT_ROOT / "config" / "dq"
 # Installed on Glue next to the wheel (Glue 5.0 = Python 3.11); the versions installed locally.
 GLUE_PYPI_MODULES = ("psycopg[binary]==3.3.6", "PyYAML==6.0.3")
-FLEX_DPU_HOUR = 0.29        # ap-southeast-2, Glue 5.0 Flex (AWS Pricing API, 2026-10-09)
+FLEX_DPU_HOUR = 0.29  # ap-southeast-2, Glue 5.0 Flex (AWS Pricing API, 2026-10-09)
 SYNC_EXCLUDES = ("*.crc", "*/_staging/*", "*.DS_Store")
 
 
 class Ctx:
     def __init__(self):
-        self.cfg = load_config()   # local target: the source of the values that go into the secret
+        self.cfg = load_config()  # local target: the source of the values that go into the secret
         self.aws = self.cfg["aws"]
         self.region = self.aws["region"]
         self.session = session(self.region)
@@ -107,17 +108,35 @@ def ensure_secret(ctx: Ctx) -> None:
             sm.put_secret_value(SecretId=secret_id, SecretString=value)
             print(f"secret {secret_id}: new version stored")
     except sm.exceptions.ResourceNotFoundException:
-        sm.create_secret(Name=secret_id, SecretString=value, Tags=ctx.tag_list(),
-                         Description="olist-pipeline: Postgres password and mock-API key")
+        sm.create_secret(
+            Name=secret_id,
+            SecretString=value,
+            Tags=ctx.tag_list(),
+            Description="olist-pipeline: Postgres password and mock-API key",
+        )
         print(f"secret {secret_id}: created")
 
 
 def cmd_up(ctx: Ctx, _args) -> None:
-    sh(ctx, "aws", "cloudformation", "deploy", "--region", ctx.region, "--stack-name", STACK,
-       "--template-file", str(TEMPLATE), "--no-fail-on-empty-changeset",
-       "--parameter-overrides", f"BucketName={ctx.bucket}", f"GlueDatabaseName={ctx.aws['glue_database']}",
-       f"WorkGroupName={ctx.aws['athena_workgroup']}",
-       "--tags", *(f"{k}={v}" for k, v in ctx.tags.items()))
+    sh(
+        ctx,
+        "aws",
+        "cloudformation",
+        "deploy",
+        "--region",
+        ctx.region,
+        "--stack-name",
+        STACK,
+        "--template-file",
+        str(TEMPLATE),
+        "--no-fail-on-empty-changeset",
+        "--parameter-overrides",
+        f"BucketName={ctx.bucket}",
+        f"GlueDatabaseName={ctx.aws['glue_database']}",
+        f"WorkGroupName={ctx.aws['athena_workgroup']}",
+        "--tags",
+        *(f"{k}={v}" for k, v in ctx.tags.items()),
+    )
     ensure_secret(ctx)
     cmd_status(ctx, None)
 
@@ -128,8 +147,18 @@ def _excludes() -> list[str]:
 
 def cmd_sync(ctx: Ctx, _args) -> None:
     for local, prefix in ((ctx.cfg["lake"]["root"], "lake"), (ctx.cfg["paths"]["landing_dir"], "landing")):
-        sh(ctx, "aws", "s3", "sync", f"{local}/", f"s3://{ctx.bucket}/{prefix}/", "--region", ctx.region,
-           "--only-show-errors", *_excludes())
+        sh(
+            ctx,
+            "aws",
+            "s3",
+            "sync",
+            f"{local}/",
+            f"s3://{ctx.bucket}/{prefix}/",
+            "--region",
+            ctx.region,
+            "--only-show-errors",
+            *_excludes(),
+        )
     cmd_status(ctx, None)
 
 
@@ -140,11 +169,27 @@ def cmd_publish(ctx: Ctx, _args) -> None:
     names), so S3 keeps exactly the local lake. Versioning keeps the old objects for 7 days.
     """
     t0 = time.time()
-    for local, prefix, delete in ((ctx.cfg["lake"]["root"], "lake", True),
-                                  (ctx.cfg["paths"]["landing_dir"], "landing", False)):
-        out = subprocess.run(["aws", "s3", "sync", f"{local}/", f"s3://{ctx.bucket}/{prefix}/", "--region", ctx.region,
-                              "--no-progress", *(["--delete"] if delete else []), *_excludes()],
-                             check=True, capture_output=True, text=True).stdout.splitlines()
+    for local, prefix, delete in (
+        (ctx.cfg["lake"]["root"], "lake", True),
+        (ctx.cfg["paths"]["landing_dir"], "landing", False),
+    ):
+        out = subprocess.run(
+            [
+                "aws",
+                "s3",
+                "sync",
+                f"{local}/",
+                f"s3://{ctx.bucket}/{prefix}/",
+                "--region",
+                ctx.region,
+                "--no-progress",
+                *(["--delete"] if delete else []),
+                *_excludes(),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
         up = sum(1 for line in out if line.startswith("upload:"))
         rm = sum(1 for line in out if line.startswith("delete:"))
         print(f"{prefix}: {up} uploaded, {rm} deleted")
@@ -154,9 +199,23 @@ def cmd_publish(ctx: Ctx, _args) -> None:
 def cmd_pull(ctx: Ctx, _args) -> None:
     """After Glue jobs wrote Silver/Gold on S3: make the local lake equal to S3 again."""
     t0 = time.time()
-    out = subprocess.run(["aws", "s3", "sync", f"s3://{ctx.bucket}/lake/", f"{ctx.cfg['lake']['root']}/",
-                          "--region", ctx.region, "--no-progress", "--delete", *_excludes()],
-                         check=True, capture_output=True, text=True).stdout.splitlines()
+    out = subprocess.run(
+        [
+            "aws",
+            "s3",
+            "sync",
+            f"s3://{ctx.bucket}/lake/",
+            f"{ctx.cfg['lake']['root']}/",
+            "--region",
+            ctx.region,
+            "--no-progress",
+            "--delete",
+            *_excludes(),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
     down = sum(1 for line in out if line.startswith("download:"))
     rm = sum(1 for line in out if line.startswith("delete:"))
     print(f"lake: {down} downloaded, {rm} deleted locally in {time.time() - t0:.1f}s")
@@ -174,8 +233,11 @@ def bucket_usage(ctx: Ctx, prefix: str = "") -> tuple[int, int]:
 
 
 def tagged_resources(ctx: Ctx) -> list[str]:
-    pages = ctx.client("resourcegroupstaggingapi").get_paginator("get_resources").paginate(
-        TagFilters=[{"Key": k, "Values": [v]} for k, v in ctx.tags.items()])
+    pages = (
+        ctx.client("resourcegroupstaggingapi")
+        .get_paginator("get_resources")
+        .paginate(TagFilters=[{"Key": k, "Values": [v]} for k, v in ctx.tags.items()])
+    )
     return [r["ResourceARN"] for p in pages for r in p["ResourceTagMappingList"]]
 
 
@@ -196,27 +258,45 @@ def cmd_status(ctx: Ctx, _args) -> None:
 
 # --- Glue test job ----------------------------------------------------------------------------
 
+
 def ensure_glue_role(ctx: Ctx, name: str = GLUE_ROLE, writable: tuple[str, ...] = ("glue-test",)) -> str:
     """Glue service role with S3 access to this bucket only: read lake/glue/control, write `writable` prefixes."""
     iam = ctx.client("iam")
-    trust = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole",
-                                                      "Principal": {"Service": "glue.amazonaws.com"}}]}
+    trust = {
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole", "Principal": {"Service": "glue.amazonaws.com"}}],
+    }
     try:
         arn = iam.get_role(RoleName=name)["Role"]["Arn"]
     except iam.exceptions.NoSuchEntityException:
-        arn = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust),
-                              Description=f"olist-pipeline Glue role ({name})", Tags=ctx.tag_list())["Role"]["Arn"]
-        time.sleep(10)   # IAM is eventually consistent; Glue can't assume a role in its first seconds
+        arn = iam.create_role(
+            RoleName=name,
+            AssumeRolePolicyDocument=json.dumps(trust),
+            Description=f"olist-pipeline Glue role ({name})",
+            Tags=ctx.tag_list(),
+        )["Role"]["Arn"]
+        time.sleep(10)  # IAM is eventually consistent; Glue can't assume a role in its first seconds
     iam.attach_role_policy(RoleName=name, PolicyArn="arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole")
     b = f"arn:aws:s3:::{ctx.bucket}"
     readable = sorted({"lake", "glue", "control", "glue-test", *writable})
-    iam.put_role_policy(RoleName=name, PolicyName="olist-bucket", PolicyDocument=json.dumps({
-        "Version": "2012-10-17", "Statement": [
-            {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": b},
-            {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": [f"{b}/{p}/*" for p in readable]},
-            {"Effect": "Allow", "Action": ["s3:PutObject", "s3:DeleteObject"],
-             "Resource": [f"{b}/{p}/*" for p in writable]},
-        ]}))
+    iam.put_role_policy(
+        RoleName=name,
+        PolicyName="olist-bucket",
+        PolicyDocument=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": b},
+                    {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": [f"{b}/{p}/*" for p in readable]},
+                    {
+                        "Effect": "Allow",
+                        "Action": ["s3:PutObject", "s3:DeleteObject"],
+                        "Resource": [f"{b}/{p}/*" for p in writable],
+                    },
+                ],
+            }
+        ),
+    )
     return arn
 
 
@@ -226,34 +306,58 @@ def cmd_glue_deploy(ctx: Ctx, _args) -> None:
     dist = PROJECT_ROOT / "dist"
     for old in dist.glob("*.whl"):
         old.unlink()
-    subprocess.run([os.environ.get("UV", str(Path.home() / ".local/bin/uv")), "build", "--wheel", "--out-dir",
-                    str(dist), str(PROJECT_ROOT)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            os.environ.get("UV", str(Path.home() / ".local/bin/uv")),
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(dist),
+            str(PROJECT_ROOT),
+        ],
+        check=True,
+        capture_output=True,
+    )
     wheel = next(dist.glob("olist_pipeline-*.whl"))
     s3.upload_file(str(wheel), ctx.bucket, f"glue/{wheel.name}")
     s3.upload_file(str(PIPELINE_ENTRY), ctx.bucket, "glue/glue_job.py")
     for suite in sorted(DQ_SUITES.glob("*.yaml")):
         s3.upload_file(str(suite), ctx.bucket, f"glue/dq/{suite.name}")
     role = ensure_glue_role(ctx, PIPELINE_ROLE, writable=("lake", "control"))
-    job = dict(Role=role, Command={"Name": "glueetl", "ScriptLocation": f"s3://{ctx.bucket}/glue/glue_job.py",
-                                   "PythonVersion": "3"},
-               GlueVersion="5.0", WorkerType="G.1X", NumberOfWorkers=2, ExecutionClass="FLEX",
-               Timeout=30, MaxRetries=0, ExecutionProperty={"MaxConcurrentRuns": 1},
-               DefaultArguments={
-                   "--job-language": "python",
-                   "--additional-python-modules": ",".join([f"s3://{ctx.bucket}/glue/{wheel.name}", *GLUE_PYPI_MODULES]),
-                   "--LAKE": f"s3://{ctx.bucket}/lake",
-                   "--SUITES": f"s3://{ctx.bucket}/glue/dq/",
-                   "--enable-metrics": "false"})
+    job = dict(
+        Role=role,
+        Command={"Name": "glueetl", "ScriptLocation": f"s3://{ctx.bucket}/glue/glue_job.py", "PythonVersion": "3"},
+        GlueVersion="5.0",
+        WorkerType="G.1X",
+        NumberOfWorkers=2,
+        ExecutionClass="FLEX",
+        Timeout=30,
+        MaxRetries=0,
+        ExecutionProperty={"MaxConcurrentRuns": 1},
+        DefaultArguments={
+            "--job-language": "python",
+            "--additional-python-modules": ",".join([f"s3://{ctx.bucket}/glue/{wheel.name}", *GLUE_PYPI_MODULES]),
+            "--LAKE": f"s3://{ctx.bucket}/lake",
+            "--SUITES": f"s3://{ctx.bucket}/glue/dq/",
+            "--enable-metrics": "false",
+        },
+    )
     try:
         glue.get_job(JobName=PIPELINE_JOB)
         glue.update_job(JobName=PIPELINE_JOB, JobUpdate=job)
         print(f"job {PIPELINE_JOB}: updated")
     except glue.exceptions.EntityNotFoundException:
-        glue.create_job(Name=PIPELINE_JOB, Tags=ctx.tags,
-                        Description="olist-pipeline: Silver, Gold and DQ for one batch date (--TASK, --DATE)", **job)
+        glue.create_job(
+            Name=PIPELINE_JOB,
+            Tags=ctx.tags,
+            Description="olist-pipeline: Silver, Gold and DQ for one batch date (--TASK, --DATE)",
+            **job,
+        )
         print(f"job {PIPELINE_JOB}: created")
-    print(f"  {wheel.name}, entry script, {len(list(DQ_SUITES.glob('*.yaml')))} DQ suites uploaded to s3://<bucket>/glue/;"
-          f" Glue 5.0 Flex, 2 x G.1X, timeout 30 min, 0 retries; role {PIPELINE_ROLE}")
+    print(
+        f"  {wheel.name}, entry script, {len(list(DQ_SUITES.glob('*.yaml')))} DQ suites uploaded to s3://<bucket>/glue/;"
+        f" Glue 5.0 Flex, 2 x G.1X, timeout 30 min, 0 retries; role {PIPELINE_ROLE}"
+    )
 
 
 def cmd_glue_test(ctx: Ctx, args) -> None:
@@ -261,20 +365,29 @@ def cmd_glue_test(ctx: Ctx, args) -> None:
     role = ensure_glue_role(ctx)
     script_key = "glue-test/scripts/glue_test_job.py"
     s3.upload_file(str(GLUE_SCRIPT), ctx.bucket, script_key)
-    job = dict(Role=role, Command={"Name": "glueetl", "ScriptLocation": f"s3://{ctx.bucket}/{script_key}",
-                                   "PythonVersion": "3"},
-               GlueVersion="5.0", WorkerType="G.1X", NumberOfWorkers=2, ExecutionClass="FLEX",
-               Timeout=5, MaxRetries=0, ExecutionProperty={"MaxConcurrentRuns": 1},
-               DefaultArguments={"--job-language": "python",
-                                 "--INPUT": f"s3://{ctx.bucket}/lake/gold/dim_date/",
-                                 "--OUTPUT": f"s3://{ctx.bucket}/glue-test/output/"})
+    job = dict(
+        Role=role,
+        Command={"Name": "glueetl", "ScriptLocation": f"s3://{ctx.bucket}/{script_key}", "PythonVersion": "3"},
+        GlueVersion="5.0",
+        WorkerType="G.1X",
+        NumberOfWorkers=2,
+        ExecutionClass="FLEX",
+        Timeout=5,
+        MaxRetries=0,
+        ExecutionProperty={"MaxConcurrentRuns": 1},
+        DefaultArguments={
+            "--job-language": "python",
+            "--INPUT": f"s3://{ctx.bucket}/lake/gold/dim_date/",
+            "--OUTPUT": f"s3://{ctx.bucket}/glue-test/output/",
+        },
+    )
     try:
         glue.get_job(JobName=GLUE_JOB)
         glue.update_job(JobName=GLUE_JOB, JobUpdate=job)
     except glue.exceptions.EntityNotFoundException:
         glue.create_job(Name=GLUE_JOB, Tags=ctx.tags, Description="olist-pipeline: smallest Spark test", **job)
     print(f"job {GLUE_JOB}: Glue 5.0, FLEX, 2 x G.1X (2 DPU), timeout 5 min, 0 retries")
-    for attempt in range(6):   # a just-created role can take a few more seconds to become assumable
+    for attempt in range(6):  # a just-created role can take a few more seconds to become assumable
         try:
             run_id = glue.start_job_run(JobName=GLUE_JOB)["JobRunId"]
             break
@@ -291,8 +404,10 @@ def cmd_glue_test(ctx: Ctx, args) -> None:
         time.sleep(15)
     secs = run.get("ExecutionTime", 0)
     dpu_secs = run.get("DPUSeconds") or max(secs, 60) * 2
-    print(f"run {run_id}: {run['JobRunState']} after {time.time() - t0:.0f}s wall clock; "
-          f"billed execution {secs}s, {dpu_secs:.0f} DPU-seconds -> ${dpu_secs / 3600 * FLEX_DPU_HOUR:.4f}")
+    print(
+        f"run {run_id}: {run['JobRunState']} after {time.time() - t0:.0f}s wall clock; "
+        f"billed execution {secs}s, {dpu_secs:.0f} DPU-seconds -> ${dpu_secs / 3600 * FLEX_DPU_HOUR:.4f}"
+    )
     if run.get("ErrorMessage"):
         print("error: " + masked(run["ErrorMessage"][:500], ctx))
     if run["JobRunState"] == "SUCCEEDED":
@@ -303,6 +418,7 @@ def cmd_glue_test(ctx: Ctx, args) -> None:
 
 
 # --- teardown ---------------------------------------------------------------------------------
+
 
 def delete_glue(ctx: Ctx, dry: bool) -> None:
     """Glue jobs and their IAM roles (IAM roles don't show up in the tagging API, so they're named here)."""
@@ -335,12 +451,15 @@ def empty_bucket(ctx: Ctx, dry: bool) -> None:
         pages = list(s3.get_paginator("list_object_versions").paginate(Bucket=ctx.bucket))
     except s3.exceptions.NoSuchBucket:
         return
-    keys = [{"Key": v["Key"], "VersionId": v["VersionId"]}
-            for p in pages for v in p.get("Versions", []) + p.get("DeleteMarkers", [])]
+    keys = [
+        {"Key": v["Key"], "VersionId": v["VersionId"]}
+        for p in pages
+        for v in p.get("Versions", []) + p.get("DeleteMarkers", [])
+    ]
     print(f"{'would delete' if dry else 'deleting'} {len(keys)} object versions and delete markers")
     if not dry:
         for i in range(0, len(keys), 1000):
-            s3.delete_objects(Bucket=ctx.bucket, Delete={"Objects": keys[i:i + 1000], "Quiet": True})
+            s3.delete_objects(Bucket=ctx.bucket, Delete={"Objects": keys[i : i + 1000], "Quiet": True})
 
 
 def cmd_down(ctx: Ctx, args) -> None:
@@ -349,8 +468,19 @@ def cmd_down(ctx: Ctx, args) -> None:
     if n and not args.no_pull:
         print(f"pulling the S3 lake ({n} objects) back to {ctx.cfg['lake']['root']}")
         if not dry:
-            sh(ctx, "aws", "s3", "sync", f"s3://{ctx.bucket}/lake/", f"{ctx.cfg['lake']['root']}/", "--delete",
-               "--region", ctx.region, "--only-show-errors", *_excludes())
+            sh(
+                ctx,
+                "aws",
+                "s3",
+                "sync",
+                f"s3://{ctx.bucket}/lake/",
+                f"{ctx.cfg['lake']['root']}/",
+                "--delete",
+                "--region",
+                ctx.region,
+                "--only-show-errors",
+                *_excludes(),
+            )
     delete_glue(ctx, dry)
     sm = ctx.client("secretsmanager")
     try:
@@ -383,9 +513,17 @@ def main() -> None:
     d.add_argument("--no-pull", action="store_true", help="don't copy the S3 lake back to the local lake first")
     args = p.parse_args()
     ctx = Ctx()
-    {"check": cmd_check, "up": cmd_up, "sync": cmd_sync, "publish": cmd_publish, "status": cmd_status, "glue-test": cmd_glue_test,
-     "glue-deploy": cmd_glue_deploy, "pull": cmd_pull,
-     "down": cmd_down}[args.cmd](ctx, args)
+    {
+        "check": cmd_check,
+        "up": cmd_up,
+        "sync": cmd_sync,
+        "publish": cmd_publish,
+        "status": cmd_status,
+        "glue-test": cmd_glue_test,
+        "glue-deploy": cmd_glue_deploy,
+        "pull": cmd_pull,
+        "down": cmd_down,
+    }[args.cmd](ctx, args)
 
 
 if __name__ == "__main__":

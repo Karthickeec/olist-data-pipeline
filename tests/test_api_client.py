@@ -1,7 +1,7 @@
 import json
 import logging
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from email.utils import format_datetime
 
 import httpx
@@ -27,17 +27,18 @@ def test_recovers_from_injected_429s_and_500s(activity_index, caplog):
     clean, _ = make_client(activity_index, ServerSettings())
     expected = clean.fetch_day(DAY)
 
-    flaky, waits = make_client(activity_index, ServerSettings(
-        rate_limit_rate=0.3, error_rate=0.2, retry_after_seconds=2, seed=11))
+    flaky, waits = make_client(
+        activity_index, ServerSettings(rate_limit_rate=0.3, error_rate=0.2, retry_after_seconds=2, seed=11)
+    )
     with caplog.at_level(logging.WARNING, logger="olist_pipeline.api.client"):
         pages = flaky.fetch_day(DAY)
 
-    assert pages == expected                       # failures never change the data
+    assert pages == expected  # failures never change the data
     assert flaky.stats.records == clean.stats.records > 0
     assert flaky.stats.retries == len(waits) == len(caplog.records) > 0
     assert flaky.stats.wait_seconds == pytest.approx(sum(waits))
     saw = set()
-    for rec, wait in zip(caplog.records, waits):
+    for rec, wait in zip(caplog.records, waits, strict=False):
         msg = rec.getMessage()
         assert f"waiting {wait:.2f}s" in msg and "attempt" in msg
         if "HTTP 429" in msg:
@@ -55,17 +56,18 @@ def test_gives_up_after_max_attempts(activity_index):
     client, waits = make_client(activity_index, ServerSettings(rate_limit_rate=1.0), max_attempts=5)
     with pytest.raises(ApiError, match="giving up after 5 attempts .*HTTP 429"):
         client.fetch_day(DAY)
-    assert len(waits) == 4          # 5 attempts, 4 waits in between
+    assert len(waits) == 4  # 5 attempts, 4 waits in between
 
 
 def test_backoff_doubles_and_is_capped(activity_index):
-    client, waits = make_client(activity_index, ServerSettings(error_rate=1.0), max_attempts=6,
-                                backoff_base=0.5, backoff_max=3.0)
+    client, waits = make_client(
+        activity_index, ServerSettings(error_rate=1.0), max_attempts=6, backoff_base=0.5, backoff_max=3.0
+    )
     with pytest.raises(ApiError):
         client.get_page(DAY, 1)
     caps = [0.5, 1.0, 2.0, 3.0, 3.0]
     assert len(waits) == 5
-    for wait, cap in zip(waits, caps):
+    for wait, cap in zip(waits, caps, strict=True):
         assert cap * 0.5 <= wait <= cap
 
 
@@ -78,8 +80,15 @@ def test_no_retry_on_401(activity_index):
 
 def test_transport_errors_are_retried():
     calls = {"n": 0}
-    body = {"date": "2018-03-01", "page": 1, "page_size": 100, "total_records": 1, "total_pages": 1,
-            "next_page": None, "data": [{"customer_unique_id": "u1"}]}
+    body = {
+        "date": "2018-03-01",
+        "page": 1,
+        "page_size": 100,
+        "total_records": 1,
+        "total_pages": 1,
+        "next_page": None,
+        "data": [{"customer_unique_id": "u1"}],
+    }
 
     def handler(request):
         calls["n"] += 1
@@ -95,10 +104,18 @@ def test_transport_errors_are_retried():
 
 
 def test_total_records_mismatch_fails():
-    body = {"date": "2018-03-01", "page": 1, "page_size": 100, "total_records": 5, "total_pages": 1,
-            "next_page": None, "data": [{"customer_unique_id": "u1"}]}
-    http = httpx.Client(base_url="http://api", transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, json=body)))
+    body = {
+        "date": "2018-03-01",
+        "page": 1,
+        "page_size": 100,
+        "total_records": 5,
+        "total_pages": 1,
+        "next_page": None,
+        "data": [{"customer_unique_id": "u1"}],
+    }
+    http = httpx.Client(
+        base_url="http://api", transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    )
     with pytest.raises(ApiError, match="expected 5"):
         ActivityClient(http, KEY, sleep=lambda s: None).fetch_day(DAY)
 
@@ -107,7 +124,7 @@ def test_parse_retry_after():
     assert parse_retry_after("3") == 3.0
     assert parse_retry_after(None) is None
     assert parse_retry_after("soon") is None
-    future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=30), usegmt=True)
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
     assert 25 < parse_retry_after(future) <= 30
 
 

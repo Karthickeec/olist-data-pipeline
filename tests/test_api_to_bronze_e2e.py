@@ -1,4 +1,5 @@
 """End to end over real HTTP: uvicorn in a thread, failure injection on, Spark writing Bronze."""
+
 import copy
 import json
 import logging
@@ -10,8 +11,8 @@ from datetime import date
 
 import pytest
 import uvicorn
-
 from conftest import assert_same_rows
+
 from olist_pipeline.api.app import ServerSettings, create_app
 from olist_pipeline.api.client import landing_dir_for
 from olist_pipeline.bronze import utc_now
@@ -26,8 +27,9 @@ DAYS = (date(2018, 3, 1), date(2018, 3, 2), date(2018, 3, 3))
 @pytest.fixture(scope="module")
 def api_url(activity_index):
     # Retry-After 0 keeps the test fast; the rates are high so every run sees retries.
-    app = create_app(activity_index, KEY, ServerSettings(
-        rate_limit_rate=0.15, error_rate=0.10, retry_after_seconds=0, seed=7))
+    app = create_app(
+        activity_index, KEY, ServerSettings(rate_limit_rate=0.15, error_rate=0.10, retry_after_seconds=0, seed=7)
+    )
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -83,22 +85,34 @@ def test_three_days_then_rerun_middle_day(spark, cfg, tmp_path, caplog):
     run_day(spark, cfg, middle)
     after = spark.read.parquet(partition_path(out, middle)).drop("_ingested_at")
     assert_same_rows(before, after)
-    assert {p.name: p.read_bytes()
-            for p in landing_dir_for(cfg["paths"]["landing_dir"], middle).iterdir()} == saved_landing
+    assert {
+        p.name: p.read_bytes() for p in landing_dir_for(cfg["paths"]["landing_dir"], middle).iterdir()
+    } == saved_landing
     assert spark.read.parquet(out).select("ingest_date").distinct().count() == 3
 
 
 def test_dirty_records_land_raw(spark, cfg):
     _, result = run_day(spark, cfg, DAYS[0])
-    df = spark.read.parquet(partition_path(
-        table_path(cfg["lake"]["root"], "bronze", "api", "customer_activity"), DAYS[0]))
-    assert set(df.columns) >= {"customer_unique_id", "sessions", "last_seen_at", "device", "_page",
-                               "_source_file", "_corrupt_record", "_batch_date", "_source"}
-    dirty = df.filter("sessions LIKE '-%' OR last_seen_at LIKE '%/%' OR page_views IS NULL "
-                      "OR device IS NULL OR last_seen_at IS NULL").count()
+    df = spark.read.parquet(
+        partition_path(table_path(cfg["lake"]["root"], "bronze", "api", "customer_activity"), DAYS[0])
+    )
+    assert set(df.columns) >= {
+        "customer_unique_id",
+        "sessions",
+        "last_seen_at",
+        "device",
+        "_page",
+        "_source_file",
+        "_corrupt_record",
+        "_batch_date",
+        "_source",
+    }
+    dirty = df.filter(
+        "sessions LIKE '-%' OR last_seen_at LIKE '%/%' OR page_views IS NULL OR device IS NULL OR last_seen_at IS NULL"
+    ).count()
     assert 0 < dirty < result.rows * 0.05
     assert df.filter("_corrupt_record IS NOT NULL").count() == 0
-    assert dict(df.dtypes)["sessions"] == "string"   # raw as sent, not cast
+    assert dict(df.dtypes)["sessions"] == "string"  # raw as sent, not cast
 
 
 def test_corrupt_page_is_kept(spark, cfg):
@@ -106,7 +120,8 @@ def test_corrupt_page_is_kept(spark, cfg):
     folder = landing_dir_for(cfg["paths"]["landing_dir"], DAYS[0])
     (folder / "page_0099.json").write_text('{"page": 99, "data": [ {"customer_unique_id": ')
     load_to_bronze(spark, cfg, DAYS[0], utc_now())
-    df = spark.read.parquet(partition_path(
-        table_path(cfg["lake"]["root"], "bronze", "api", "customer_activity"), DAYS[0]))
+    df = spark.read.parquet(
+        partition_path(table_path(cfg["lake"]["root"], "bronze", "api", "customer_activity"), DAYS[0])
+    )
     [bad] = df.filter("_corrupt_record IS NOT NULL").collect()
     assert bad._source_file.endswith("page_0099.json") and bad.customer_unique_id is None

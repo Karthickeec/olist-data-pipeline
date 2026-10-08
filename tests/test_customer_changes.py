@@ -50,8 +50,15 @@ def test_rate_and_dirty_mix_over_many_days():
 def test_records_are_well_formed():
     day = date(2017, 5, 1)
     for r in gen(day, n_orders=2000):
-        assert set(r) == {"change_id", "customer_unique_id", "new_zip_code_prefix", "new_city",
-                          "new_state", "requested_at", "source"}
+        assert set(r) == {
+            "change_id",
+            "customer_unique_id",
+            "new_zip_code_prefix",
+            "new_city",
+            "new_state",
+            "requested_at",
+            "source",
+        }
         assert r["requested_at"].startswith("2017-05-01 ")
 
 

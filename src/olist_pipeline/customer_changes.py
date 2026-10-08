@@ -6,6 +6,7 @@ About `dirty_rate` of the requests are deliberately malformed so later layers ha
 something to clean: exact duplicates, messy state codes, null city, or a
 customer_unique_id that does not exist.
 """
+
 import hashlib
 import json
 import os
@@ -19,8 +20,12 @@ SOURCE_NAME = "crm_portal"
 CHANGE_ID_NAMESPACE = uuid.UUID("6f1c1d2e-3b4a-4c5d-8e9f-0a1b2c3d4e5f")
 DIRTY_KINDS = ("duplicate", "messy_state", "null_city", "unknown_customer")
 STATE_NAMES = {
-    "SP": "São Paulo", "RJ": "Rio de Janeiro", "MG": "Minas Gerais",
-    "RS": "Rio Grande do Sul", "PR": "Paraná", "BA": "Bahia",
+    "SP": "São Paulo",
+    "RJ": "Rio de Janeiro",
+    "MG": "Minas Gerais",
+    "RS": "Rio Grande do Sul",
+    "PR": "Paraná",
+    "BA": "Bahia",
 }
 
 
@@ -58,9 +63,14 @@ def generate_changes(
         }
         dirty = rng.choice(DIRTY_KINDS) if rng.random() < dirty_rate else None
         if dirty == "messy_state":
-            record["new_state"] = rng.choice([
-                state.lower(), f" {state} ", f"{state.lower()} ", STATE_NAMES.get(state, state.title()),
-            ])
+            record["new_state"] = rng.choice(
+                [
+                    state.lower(),
+                    f" {state} ",
+                    f"{state.lower()} ",
+                    STATE_NAMES.get(state, state.title()),
+                ]
+            )
         elif dirty == "null_city":
             record["new_city"] = None
         elif dirty == "unknown_customer":

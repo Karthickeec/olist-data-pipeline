@@ -1,4 +1,5 @@
 """Smoke test for local Spark: Java, Parquet round trip, and a JDBC read from Postgres."""
+
 import sys
 import tempfile
 
@@ -12,9 +13,11 @@ def main() -> None:
     ok = True
     try:
         jvm = spark.sparkContext._jvm
-        print(f"Spark {spark.version}, Java {jvm.System.getProperty('java.version')}, "
-              f"master {spark.sparkContext.master}, "
-              f"time zone {spark.conf.get('spark.sql.session.timeZone')}")
+        print(
+            f"Spark {spark.version}, Java {jvm.System.getProperty('java.version')}, "
+            f"master {spark.sparkContext.master}, "
+            f"time zone {spark.conf.get('spark.sql.session.timeZone')}"
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             spark.range(5).write.parquet(f"{tmp}/smoke")

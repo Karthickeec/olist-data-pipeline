@@ -1,4 +1,5 @@
 """Silver end to end against a real Postgres: replay -> Bronze (Postgres, files, API) -> Silver."""
+
 import copy
 from datetime import date
 from types import SimpleNamespace
@@ -44,19 +45,19 @@ def env(tmp_path_factory, activity_index):
     for s in (SCHEMA, PIPELINE):
         conn.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
     apply_schema(conn, SCHEMA)
-    seed_reference(conn, cfg["paths"]["raw_dir"])            # geolocation too: Silver needs it
+    seed_reference(conn, cfg["paths"]["raw_dir"])  # geolocation too: Silver needs it
     src = load_sources(cfg["paths"]["raw_dir"])
     api = TestClient(create_app(activity_index, KEY, ServerSettings()))
-    yield SimpleNamespace(cfg=cfg, conn=conn, src=src, idx=build_index(src),
-                          pool=read_address_pool(cfg["paths"]["raw_dir"]), api=api)
+    yield SimpleNamespace(
+        cfg=cfg, conn=conn, src=src, idx=build_index(src), pool=read_address_pool(cfg["paths"]["raw_dir"]), api=api
+    )
     for s in (SCHEMA, PIPELINE):
         conn.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
     conn.close()
 
 
 def replay(env, day):
-    replay_day(env.conn, env.src, env.idx, day, env.cfg["paths"]["landing_dir"], env.pool,
-               env.cfg["customer_changes"])
+    replay_day(env.conn, env.src, env.idx, day, env.cfg["paths"]["landing_dir"], env.pool, env.cfg["customer_changes"])
 
 
 def bronze(spark, env, day, monkeypatch):
@@ -68,9 +69,14 @@ def bronze(spark, env, day, monkeypatch):
 
 
 def runs(env, day):
-    return {r[0]: r[1:] for r in env.conn.execute(
-        f"SELECT table_name, rows_in, rows_valid, rows_quarantined, rows_duplicate, rows_pending "
-        f"FROM {PIPELINE}.layer_runs WHERE layer = 'silver' AND batch_date = %s", (day,))}
+    return {
+        r[0]: r[1:]
+        for r in env.conn.execute(
+            f"SELECT table_name, rows_in, rows_valid, rows_quarantined, rows_duplicate, rows_pending "
+            f"FROM {PIPELINE}.layer_runs WHERE layer = 'silver' AND batch_date = %s",
+            (day,),
+        )
+    }
 
 
 def test_daily_silver_with_late_arriving_orders_and_rerun(spark, env, monkeypatch):
@@ -86,13 +92,13 @@ def test_daily_silver_with_late_arriving_orders_and_rerun(spark, env, monkeypatc
     bronze(spark, env, D2, monkeypatch)
     silver.run(spark, env.cfg, D2)
     day2 = runs(env, D2)
-    assert day2["order_items"][4] > 0 and day2["order_payments"][4] > 0        # pending, not quarantined
+    assert day2["order_items"][4] > 0 and day2["order_payments"][4] > 0  # pending, not quarantined
     assert day2["order_items"][2] == 0
 
     bronze(spark, env, D3, monkeypatch)
     silver.run(spark, env.cfg, D3)
     day3 = runs(env, D3)
-    assert day3["order_items"][4] == 0 and day3["order_payments"][4] == 0      # resolved
+    assert day3["order_items"][4] == 0 and day3["order_payments"][4] == 0  # resolved
 
     # Every batch balances: in = valid + quarantined + duplicate + pending.
     for day in (D1, D2, D3):

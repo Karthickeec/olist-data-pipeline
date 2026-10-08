@@ -5,9 +5,10 @@ file count further: the files are small because the partitions are daily. This e
 monthly-partitioned copy (one file per month), uploads it to s3://<bucket>/experiments/, and runs the
 same queries on both tables. The pipeline itself is not changed.
 """
+
 import statistics
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pyspark.sql import functions as F
@@ -22,8 +23,9 @@ LOCAL = PROJECT_ROOT / "data" / "experiments" / "fact_order_lines_monthly"
 REPEATS = 5
 QUERIES = {
     "full scan: lines and payments": "SELECT count(*), sum(allocated_payment) FROM {t}",
-    "one month: revenue by state": ("SELECT customer_state, sum(price) FROM {t} WHERE {month_filter} "
-                                    "GROUP BY 1 ORDER BY 2 DESC LIMIT 5"),
+    "one month: revenue by state": (
+        "SELECT customer_state, sum(price) FROM {t} WHERE {month_filter} GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+    ),
 }
 
 
@@ -42,19 +44,40 @@ def main() -> None:
     spark = build_spark(cfg, "small-files-experiment")
     fact = spark.read.parquet(str(daily_local))
     monthly = fact.withColumn("order_purchase_month", F.date_format("order_purchase_date", "yyyy-MM"))
-    (monthly.repartition("order_purchase_month").write.mode("overwrite")
-        .partitionBy("order_purchase_month").parquet(str(LOCAL)))
+    (
+        monthly.repartition("order_purchase_month")
+        .write.mode("overwrite")
+        .partitionBy("order_purchase_month")
+        .parquet(str(LOCAL))
+    )
     columns = [(f.name, f.dataType.simpleString()) for f in spark.read.parquet(str(LOCAL)).schema.fields]
     last_month = monthly.agg(F.max("order_purchase_month")).first()[0]
     spark.stop()
 
-    subprocess.run(["aws", "s3", "sync", f"{LOCAL}/", f"s3://{bucket}/experiments/fact_order_lines_monthly/",
-                    "--delete", "--only-show-errors", "--exclude", "*.crc", "--region", aws["region"]], check=True)
+    subprocess.run(
+        [
+            "aws",
+            "s3",
+            "sync",
+            f"{LOCAL}/",
+            f"s3://{bucket}/experiments/fact_order_lines_monthly/",
+            "--delete",
+            "--only-show-errors",
+            "--exclude",
+            "*.crc",
+            "--region",
+            aws["region"],
+        ],
+        check=True,
+    )
 
     athena = Athena(session(aws["region"]).client("athena"), aws["athena_workgroup"], aws["glue_database"])
     loc = f"s3://{bucket}/experiments/fact_order_lines_monthly/"
-    cols = ",\n".join(f"  `{c}` {t.replace('long', 'bigint').replace('integer', 'int')}"
-                      for c, t in columns if c != "order_purchase_month")
+    cols = ",\n".join(
+        f"  `{c}` {t.replace('long', 'bigint').replace('integer', 'int')}"
+        for c, t in columns
+        if c != "order_purchase_month"
+    )
     athena.run(f"DROP TABLE IF EXISTS `{MONTHLY}`")
     athena.run(f"""CREATE EXTERNAL TABLE `{MONTHLY}` (\n{cols}\n)
 PARTITIONED BY (`order_purchase_month` string)
@@ -66,9 +89,10 @@ TBLPROPERTIES ('projection.enabled'='true', 'projection.order_purchase_month.typ
   'storage.location.template'='{loc}order_purchase_month=${{order_purchase_month}}/')""")
 
     first = f"{last_month}-01"
-    filters = {DAILY: (f"order_purchase_date >= DATE '{first}' "
-                       f"AND order_purchase_date < DATE '{first}' + INTERVAL '1' MONTH"),
-               MONTHLY: f"order_purchase_month = '{last_month}'"}
+    filters = {
+        DAILY: (f"order_purchase_date >= DATE '{first}' AND order_purchase_date < DATE '{first}' + INTERVAL '1' MONTH"),
+        MONTHLY: f"order_purchase_month = '{last_month}'",
+    }
     d_files, d_parts, d_kb = file_stats(daily_local)
     m_files, m_parts, m_kb = file_stats(LOCAL)
     results = []
@@ -76,17 +100,25 @@ TBLPROPERTIES ('projection.enabled'='true', 'projection.order_purchase_month.typ
         answers = {}
         for table in (DAILY, MONTHLY):
             q = sql.format(t=table, month_filter=filters[table])
-            athena.rows(q)   # warm-up, not counted
+            athena.rows(q)  # warm-up, not counted
             runs = [athena.rows(q) for _ in range(REPEATS)]
             answers[table] = runs[0][0]
-            results.append((name, table, statistics.median(r[1]["ms"] for r in runs),
-                            min(r[1]["ms"] for r in runs), max(r[1]["ms"] for r in runs), runs[0][1]["bytes"]))
+            results.append(
+                (
+                    name,
+                    table,
+                    statistics.median(r[1]["ms"] for r in runs),
+                    min(r[1]["ms"] for r in runs),
+                    max(r[1]["ms"] for r in runs),
+                    runs[0][1]["bytes"],
+                )
+            )
         assert answers[DAILY] == answers[MONTHLY], f"{name}: tables disagree: {answers}"
 
     lines = [
         "# Small files: daily vs monthly partitions (Athena)",
         "",
-        f"Generated by `scripts/small_files_experiment.py` on {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC "
+        f"Generated by `scripts/small_files_experiment.py` on {datetime.now(UTC):%Y-%m-%d %H:%M} UTC "
         f"(ap-southeast-2, workgroup `{aws['athena_workgroup']}`).",
         "",
         "The pipeline already writes **one file per partition**, so `coalesce` or `maxRecordsPerFile` can't",
@@ -106,10 +138,15 @@ TBLPROPERTIES ('projection.enabled'='true', 'projection.order_purchase_month.typ
     ]
     for name, table, med, lo, hi, scanned in results:
         layout = "daily" if table == DAILY else "monthly"
-        lines.append(f"| {name} | {layout} | {med / 1000:.2f} s | {lo / 1000:.2f}–{hi / 1000:.2f} s | {scanned / 1e6:.2f} MB |")
-    lines += ["", "Not applied to the pipeline yet: moving Silver/Gold to monthly partitions changes the",
-              "merge unit (a day's batch rewrites its month), DQ scopes, verification and the Athena DDL.",
-              "See docs/PLAN.md (Step 8 notes) for the decision."]
+        lines.append(
+            f"| {name} | {layout} | {med / 1000:.2f} s | {lo / 1000:.2f}–{hi / 1000:.2f} s | {scanned / 1e6:.2f} MB |"
+        )
+    lines += [
+        "",
+        "Not applied to the pipeline yet: moving Silver/Gold to monthly partitions changes the",
+        "merge unit (a day's batch rewrites its month), DQ scopes, verification and the Athena DDL.",
+        "See docs/PLAN.md (Step 8 notes) for the decision.",
+    ]
     out = PROJECT_ROOT / "docs" / "SMALL_FILES.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
