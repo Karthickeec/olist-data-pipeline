@@ -9,7 +9,7 @@ UTC_JVM = "-Duser.timezone=UTC"
 
 
 def build_spark(cfg: dict, app_name: str = "olist-pipeline", extra_conf: dict | None = None) -> SparkSession:
-    """Local Spark session.
+    """Local Spark session (with the S3A connector when the lake root is s3a://).
 
     Session and JVM time zones are pinned to UTC: Postgres `timestamp` columns
     have no zone, and any other setting shifts them by the machine's offset.
@@ -19,6 +19,11 @@ def build_spark(cfg: dict, app_name: str = "olist-pipeline", extra_conf: dict | 
         os.environ["JAVA_HOME"] = s["java_home"]
     os.environ["PYSPARK_PYTHON"] = sys.executable
     builder = SparkSession.builder
+    packages = [s["jdbc_package"]]
+    if cfg["lake"]["root"].startswith("s3a://"):
+        from olist_pipeline.aws import HADOOP_AWS_PACKAGES, s3a_conf
+        packages += HADOOP_AWS_PACKAGES
+        extra_conf = {**s3a_conf(cfg["aws"]["region"]), **(extra_conf or {})}
     for k, v in (extra_conf or {}).items():
         builder = builder.config(k, v)
     spark = (
@@ -27,7 +32,7 @@ def build_spark(cfg: dict, app_name: str = "olist-pipeline", extra_conf: dict | 
         .config("spark.driver.memory", s["driver_memory"])
         .config("spark.sql.shuffle.partitions", str(s["shuffle_partitions"]))
         .config("spark.ui.enabled", (extra_conf or {}).get("spark.ui.enabled", "false"))
-        .config("spark.jars.packages", s["jdbc_package"])
+        .config("spark.jars.packages", ",".join(packages))
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.driver.extraJavaOptions", UTC_JVM)
         .config("spark.executor.extraJavaOptions", UTC_JVM)

@@ -36,9 +36,9 @@ PAGE_SCHEMA = StructType([
 
 def make_client(cfg: dict, http: httpx.Client | None = None, **overrides) -> ActivityClient:
     api = cfg["api"]
-    api_key = os.environ.get(api["key_env"])
+    api_key = api.get("key") or os.environ.get(api["key_env"])
     if not api_key:
-        raise SystemExit(f"{api['key_env']} is not set")
+        raise SystemExit(f"{api['key_env']} is not set (and no api.key secret is configured)")
     http = http or httpx.Client(base_url=api["base_url"], timeout=api["timeout_seconds"])
     return ActivityClient(http, api_key, page_size=api["page_size"], max_attempts=api["max_attempts"],
                           backoff_base=api["backoff_base_seconds"], backoff_max=api["backoff_max_seconds"],

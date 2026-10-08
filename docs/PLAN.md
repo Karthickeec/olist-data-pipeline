@@ -2,7 +2,8 @@
 
 Portfolio project for a data engineering role (Python, PySpark, SQL, Unix, Airflow).
 Three simulated source systems feed a Bronze/Silver/Gold lake. The project is built locally
-first (8 GB Mac) and moved to AWS (S3, EMR, Athena) afterwards.
+first (8 GB Mac) and moved to AWS afterwards: S3, Secrets Manager, Athena/Glue Catalog in
+**ap-southeast-2**, with Spark on AWS Glue ETL jobs if the account allows them (EMR is blocked).
 
 ```
  Postgres (OLTP, daily replay) ──JDBC watermark──┐
@@ -266,41 +267,214 @@ light enough for 8 GB.
 
 ---
 
-## Steps 8–10 (plan only; stop before executing Step 8)
+## Steps 8–10
 
-### Step 8: lake on S3, Secrets Manager, Athena
-- **S3:** one private bucket with versioning, SSE-S3 encryption and public access blocked. Lifecycle rule: landing/ → Glacier Instant Retrieval after 90 days. `lake.root=s3a://<bucket>/lake`.
-- **Spark on S3:** `hadoop-aws:3.3.4` plus the matching AWS SDK bundle (Spark 3.5 ships Hadoop 3.3.4). The S3A committer is used for reliable partition overwrites.
-- **Credentials:**
-  - an AWS profile locally, an IAM role on EMR;
-  - the DB password and API key live in **Secrets Manager** and are resolved at runtime with boto3 (config holds `secret://olist/api-key`-style references);
-  - no secrets in git.
-- **Athena:**
-  - a Glue database `olist_lake` with external Parquet tables for Bronze, Silver and Gold;
-  - **partition projection** on `ingest_date`/business dates, so new partitions need no registration;
-  - a fallback `register_partitions` task (`ALTER TABLE … ADD IF NOT EXISTS PARTITION`) for unprojected tables;
-  - saved queries for the Gold KPIs.
-- **Decision for later:** keep plain Parquet, or move Silver/Gold to **Apache Iceberg** (Glue catalog), which brings ACID MERGE and makes the staging swap unnecessary. Plain Parquet is the plan unless Iceberg is chosen at Step 8.
-- **Cost estimate:** S3 <1 GB is about $0.03/month; Athena costs $5 per TB scanned, so cents for this data volume.
+### AWS account constraints (probed read-only on 2026-10-09)
+- **The account is on the AWS Free plan** ($100 credits until 2027-04-08; it can't be billed beyond them).
+  It belongs to an AWS Organization whose service control policies (SCPs) are not edited by this project.
+- **Region: `ap-southeast-2` only.** The SCP allows the project's home region and denies the others:
+  - S3, Athena, Glue (Data Catalog and ETL jobs), Secrets Manager, CloudFormation, CloudWatch and the
+    tagging API all answered read-only calls in ap-southeast-2.
+  - All of them were denied in ap-south-1, eu-north-1 and us-west-2.
+- **EMR and EMR Serverless are denied** even in ap-southeast-2. We accept that and don't touch the SCPs.
+  Spark on AWS moves to **AWS Glue ETL jobs** (Step 9).
+- **Rules for every AWS step:**
+  - every resource is tagged `project=olist-pipeline`;
+  - a cost estimate comes before anything that costs money;
+  - each step has its own teardown command, and teardown is run at the end;
+  - credentials are never printed, logged or committed.
+    Spark and boto3 use the default credential chain (the local AWS profile), never keys in config.
 
-### Step 9: Spark on AWS (transient EMR vs EMR Serverless)
-- **Option A, EMR on EC2:** Airflow creates the cluster, adds steps and waits on a sensor (`EmrCreateJobFlowOperator`, `EmrAddStepsOperator`, `EmrStepSensor`), then terminates it, with auto-termination as a safety net. 1 master + 2 core on-demand m5.xlarge comes to about $0.72/h including the EMR fee. With ~8–10 minutes of startup, that's roughly $0.15–0.20 per daily run.
-- **Option B, EMR Serverless:** `EmrServerlessStartJobRunOperator`; billed per vCPU-hour and GB-hour with no idle cost. A 10-minute job at 4 vCPU / 16 GB is roughly $0.05 per run, and there's no cluster startup to wait for.
-- **Source access:** EMR can't reach the laptop's Postgres. Either run Bronze-from-Postgres locally and write to S3, or move the source to RDS (free-tier db.t4g.micro if the account is eligible). Decided at Step 9.
-- Airflow stays local (MWAA costs about $0.49/h at minimum). Prices are to be re-checked at execution time.
+### Step 8: lake on S3, Secrets Manager, Athena (ap-southeast-2)
 
-### Step 10: CI, docs, interview notes
+- [x] **Done.**
+  - **Verified:**
+    - Stack + secret + $5 budget alert created and tagged.
+    - Lake and landing uploaded (4,162 + 990 files, 7.6 min).
+    - 2018-01-07..09 run with DQ proven for all three layers (32/47/31 checks per day, 0 blocking) and published.
+    - S3 identical to local after 01-09: 4,217 lake + 999 landing files, keys, sizes and MD5/ETags.
+    - `verify-bronze/silver/gold` pass (53,401 fact lines; LTV = payments, R$7,437,125.17).
+    - 31 Athena tables; Athena = Spark on 7/7 checks (1.9 MB scanned); 4 KPI named queries; partition-registration
+      fallback (385 partitions, 47,358 rows = projected table).
+    - Glue test job SUCCEEDED (Glue 5.0 / Spark 3.5.4, Flex, 2 DPU, 93 s, 171 DPU-s = $0.014).
+    - Tests: 114 pass (incl. 9 new AWS/Athena unit tests).
+  - **Deviations from the plan below:**
+    - **Compute stays local; S3 is published with an incremental `aws s3 sync --delete`.** Local Spark against
+      Sydney S3 was impractical: about 0.38 s TCP connect and 1.1 s to the first byte; Bronze took 330 s instead
+      of 10 s; Silver was stopped after 51 min. The aborted run's Bronze/Silver for 01-07 was pulled back before
+      rerunning locally.
+    - **Parity is a listing comparison** (keys, sizes, MD5/ETags), not a Spark read of every file; that read was
+      stopped after 53 min.
+    - **Athena vs Spark:** Spark reads the local lake, which the listing check proves byte-identical to S3.
+    - **Spark stays `local[2]` with a 2 GB driver,** as agreed (a short-lived `local[8]` for S3 was reverted).
+    - **`make` with no goal now fails (exit 2).** A quoted `make "dq LAYER=bronze"` had silently run the help
+      target with exit 0 in an ad-hoc loop. `run-days` additionally checks `dq_results` for fresh rows per layer.
+    - **Small files:** already one file per partition; the files are small because partitions are daily.
+      Measured monthly vs daily on Athena (docs/SMALL_FILES.md: 383 → 16 files, full scan 1.40 → 0.47 s). Daily
+      partitions are kept for now: switching changes the merge unit, DQ scopes, verification and DDL. It's listed
+      under Known limitations, with Iceberg compaction as the upgrade.
+    - **Not needed:** moving `verify.lake_fingerprint` to Hadoop listing (it already reads through Spark).
+
+**Resources** (one CloudFormation stack, `olist-pipeline-step8`, in `infra/step8.yaml`; stack tags propagate):
+
+| Resource | Settings |
+|---|---|
+| S3 bucket `olist-pipeline-<account>-apse2` | private (Block Public Access on), SSE-S3, versioning on, TLS-only bucket policy |
+| Bucket lifecycle | `landing/` → Glacier Instant Retrieval after 90 days; noncurrent versions expire after 7 days; `athena-results/` expire after 7 days; incomplete multipart uploads aborted after 1 day |
+| Athena workgroup `olist` | results in `s3://…/athena-results/`, enforced settings, **1 GB scan cutoff per query** (cost guard) |
+| Glue database `olist_lake` | holds the external tables (Glue databases and tables can't carry tags; they're deleted with the stack) |
+| Secrets Manager secret `olist/pipeline` | JSON `{pg_password, api_key}`, created by script from local values through a 0600 temp file that is deleted right after; never echoed |
+
+The account ID stays out of git: the bucket name is built at runtime from `aws sts get-caller-identity`.
+
+**Code changes:**
+1. **Spark on S3:**
+   - `hadoop-aws:3.3.4` + `aws-java-sdk-bundle:1.12.262`, the pair that matches Spark 3.5's Hadoop 3.3.4.
+   - S3A settings: endpoint `s3.ap-southeast-2.amazonaws.com`, the default credential-provider chain,
+     and no keys in Spark conf.
+   - **Committer (deviation from the first plan):** the S3A "magic"/staging committers don't support
+     Spark's dynamic partition overwrite, so writes keep the classic `FileOutputCommitter`. Its rename is
+     a copy on S3, which is slower but correct at this data size. Iceberg is the real fix (below).
+   - The lake root becomes `s3a://<bucket>/lake` when `OLIST_TARGET=aws` is set (`make … AWS=1`); the
+     default stays local.
+2. **`secret://<id>#<field>` references in config:**
+   - Resolved at load time with boto3, one call per secret, cached; values are never logged.
+   - `OLIST__PG__PASSWORD=secret://olist/pipeline#pg_password`, and a new `api.key` that, when set, takes
+     precedence over `key_env`. Local runs keep today's behaviour.
+3. **Lake-agnostic verification:** `verify.lake_fingerprint` uses Python file walking today; it moves to
+   Hadoop FileSystem listing so `verify-*` runs against an `s3a://` root.
+4. **Athena DDL generated from the data:**
+   - `scripts/athena_ddl.py` reads each table's Parquet schema with Spark and writes
+     `sql/athena/<layer>/<table>.sql` (CREATE EXTERNAL TABLE … STORED AS PARQUET), so the DDL never
+     drifts from the files.
+   - About 29 tables: Bronze 11, Silver 11, Gold 7.
+   - **Partition projection** (`type=date`, `yyyy-MM-dd`, range 2016-09-01..NOW) on `ingest_date`,
+     `order_purchase_date`, `review_date`, `requested_date`, `activity_date`, `as_of_date`. New partitions
+     need no registration; days with no data (reference-table snapshots) just return nothing.
+   - **Partition-registration fallback:** `scripts/athena.py register-partitions` (`ALTER TABLE … ADD IF
+     NOT EXISTS PARTITION`) for a table that has projection turned off; demonstrated on one table.
+5. **`scripts/athena.py`:**
+   - Runs the DDL and saves the Gold KPI queries as Athena named queries: daily revenue by category,
+     RFM segment mix, top sellers, customers who moved state (SCD2).
+   - A `check` subcommand compares Athena answers with Spark answers on the same S3 data.
+6. **Make targets:** `aws-check` (read-only probes), `aws-up` (deploy the stack and the secret),
+   `aws-sync` (upload the lake), `athena-ddl`, `athena-check`, `aws-down` (teardown).
+
+**Table format: plain Parquet (decided).**
+- The README (Step 8) and `docs/DECISIONS.md` (Step 10) describe **Apache Iceberg** on the Glue
+  catalog as the upgrade path.
+- Iceberg would bring ACID `MERGE INTO` instead of the staging swap, snapshot time travel, hidden
+  partitioning and Athena-side compaction. It would also make the S3 committer limitation irrelevant.
+
+**Execution:**
+1. Deploy the stack and the secret, then check the tags with the tagging API.
+2. Upload the local lake (through 2018-01-06) and landing to S3 with `aws s3 sync`: about 5,100 objects,
+   about 160 MB.
+3. **Parity check:** Spark reads each Silver/Gold table from local and from S3; content fingerprints must
+   match.
+4. **Make S3 the lake of record** and run the pipeline for **2018-01-07..2018-01-09**
+   (`make daily AWS=1`). Postgres, files and the API stay local; Spark writes to S3.
+   `verify-bronze`, `verify-silver` and `verify-gold` must pass against S3, with 0 blocking DQ failures.
+5. **Athena:**
+   - Create the tables and run the KPI queries.
+   - `athena-check` must match Spark exactly: fact lines, payments total, segment counts.
+   - Report bytes scanned per query.
+
+**Verification:** steps 3–5 above, plus `make test`, plus a test proving that `secret://` values never
+appear in logs or config dumps.
+
+**Teardown, `make aws-down STEP=8`** (`scripts/aws_teardown.py`):
+1. Pull the lake back: `aws s3 sync s3://…/lake data/lake`, so the local lake matches the Postgres
+   bookkeeping again (it will be at 2018-01-09).
+2. Delete the secret with `--force-delete-without-recovery`.
+3. Empty the bucket, including every object version and delete marker.
+4. `aws cloudformation delete-stack`, then wait until it's gone.
+5. Show what's left with the tagging API (`project=olist-pipeline` must return nothing).
+- `--dry-run` lists everything without deleting.
+- **When it runs:** the S3 lake is needed by Step 9, so the teardown runs after Step 9 (or right after
+  Step 8 if Step 9 is dropped).
+
+**Cost estimate** (live ap-southeast-2 prices from the AWS Pricing API, 2026-10-09):
+
+| Item | Price | Expected use | Cost |
+|---|---|---|---|
+| S3 storage | $0.025/GB-month | ~0.3 GB incl. noncurrent versions and Athena results | < $0.01/month |
+| S3 PUT/COPY/LIST | $0.0055 per 1,000 | ~5k (upload) + ~20k (3 daily runs; renames are copies) | ~$0.15 |
+| S3 GET | $0.00044 per 1,000 | ~100k | ~$0.05 |
+| Data transfer out (teardown pull-back) | first 100 GB/month free | ~0.2 GB | $0 |
+| Athena | $5/TB scanned (10 MB minimum per query) | ~60 queries, ≤ 2 GB | ~$0.01 |
+| Glue Data Catalog | $1 per 100k objects/month (first 1M free); $1 per 1M requests | ~30 tables, a few thousand requests | ~$0 |
+| Secrets Manager | $0.40 per secret-month; $0.05 per 10k calls | 1 secret, ~1 month, ~200 calls | ≤ $0.40 |
+| CloudFormation, SSE-S3, tagging API | free | | $0 |
+| **Total for Step 8, kept for up to one month** | | | **≈ $0.60, worst case < $1 (of the $100 credit)** |
+
+### Step 9: Spark on AWS Glue ETL (EMR is blocked by the Free plan)
+- **Read-only check (2026-10-09):** `glue get-jobs`, `list-jobs`, `get-job-runs`, `list-sessions`,
+  `get-crawlers` and `get-connections` all succeed in ap-southeast-2. Read access doesn't prove that
+  `CreateJob`/`StartJobRun` are allowed, so a single test job comes first.
+- **Smallest test job (needs a separate OK before it's created):**
+  - Glue 5.0 (Spark 3.5, the same minor version as the local Spark) with the **Flex** execution class.
+  - 2 × G.1X workers, which is 2 DPU, the minimum for a Spark job.
+  - Timeout 5 min, 0 retries, max concurrency 1.
+  - It reads `gold/dim_date` from S3 and writes a one-row count.
+  - It needs an IAM role `olist-glue-test` (tagged, with S3 access to the bucket only).
+  - **Billing:** per second with a 1-minute minimum. Flex costs $0.29 per DPU-hour; the standard class
+    costs $0.44.
+
+  | Run | Formula | Cost |
+  |---|---|---|
+  | Expected (~2 min, Flex) | 2 DPU × 2/60 h × $0.29 | ≈ $0.02 |
+  | Hard cap (5-min timeout, Flex) | 2 DPU × 5/60 h × $0.29 | $0.048 |
+  | Hard cap (5-min timeout, standard) | 2 DPU × 5/60 h × $0.44 | $0.073 |
+
+  - Logs to CloudWatch: a few KB, about $0.
+  - **Teardown:** delete the job, the role and its policy, and the script's S3 prefix.
+- **If Glue jobs are allowed:**
+  - Silver, DQ and Gold run as Glue jobs: the package ships as a wheel to S3 (`--additional-python-modules`).
+  - Airflow triggers them with `GlueJobOperator`.
+  - Postgres → Bronze, the CRM files and the API stay local and write Bronze to S3 (Postgres stays local,
+    no RDS).
+  - Glue 5.0 runs Python 3.11, so the code must stay 3.11-compatible there (checked at Step 9).
+  - The cost is planned at Step 9 per daily run, roughly 2–4 DPU for 3–5 min ≈ $0.03–0.10 per day.
+- **If Glue jobs are denied:** Spark stays local and writes to S3, and Athena reads it. That is
+  Step 8's setup, documented as the final architecture, with a note on what a Glue/EMR deployment would
+  change.
+- Airflow stays local (MWAA costs about $0.49/h at minimum).
+
+### Step 10: CI and project documentation
 - **GitHub Actions:**
   - `ruff check` + `ruff format --check`;
   - `pytest` with Java 17 (`setup-java`) and a `postgres:16` service container for integration tests;
   - caches for pip and Ivy;
   - a badge in the README.
-- **README:** architecture diagram (Mermaid), quick start, layer docs.
-- **`docs/INTERVIEW_NOTES.md`:** what was built, key numbers per step, design decisions and alternatives
-  (query-based CDC vs Debezium, Parquet vs Iceberg, salting vs AQE, transient EMR vs Serverless), and known limitations.
+- **`docs/ARCHITECTURE.md`:**
+  - sources, layers and data flow (Mermaid diagram);
+  - where each job runs (local vs AWS) and the S3/Athena/Glue layout;
+  - bookkeeping tables (watermarks, ingest_runs, layer_runs, dq_results).
+- **`docs/DECISIONS.md`:** design choices with the reasons and the alternatives considered:
+  - query-based CDC vs Debezium;
+  - plain Parquet with a staging swap vs Apache Iceberg (the upgrade path);
+  - the pending area and as-of lookups for late-arriving data;
+  - SCD2 with hash surrogate keys;
+  - salting vs AQE;
+  - daily vs monthly partitions (docs/SMALL_FILES.md);
+  - compute local plus S3 publish in Step 8 (measured latency);
+  - Glue ETL vs EMR (EMR denied by the Free plan's SCP);
+  - local Airflow vs MWAA.
+- **`docs/RUNBOOK.md`:**
+  - rerun a day, `--full-refresh`, backfill through Airflow;
+  - what each failure looks like and how to recover (API down, Postgres down, DQ blocking failure, half-written
+    Silver staging);
+  - publish to S3, the parity check;
+  - AWS teardown per step (`make aws-down`, `DRY_RUN=1`).
+- **README:**
+  - quick start, layer summaries and links to the docs above;
+  - a **Known limitations** section (for example: small daily files, no ACID on Parquet, reruns of older days for
+    mutable tables, local compute in Step 8, a single-machine Airflow).
 
 ## Risks and how they're handled
 - **Memory:** one Spark JVM at a time (Airflow pool, sequential Make targets); API and Airflow run only while needed.
-- **Small files:** Silver and Gold write `coalesce(1–4)` per partition; partitions stay daily and small.
+- **Small files:** one file per partition, but daily partitions keep files at 4–43 KB (docs/SMALL_FILES.md);
+  monthly partitions or Iceberg compaction are the fix.
 - **Parquet has no ACID:** the staging swap plus `--full-refresh` from Bronze; Iceberg is the documented upgrade.
 - **Time zones:** every Spark session and JVM is pinned to UTC (already in place).

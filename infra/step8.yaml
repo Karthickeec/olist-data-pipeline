@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  olist-pipeline Step 8: S3 lake bucket, Athena workgroup and Glue database (ap-southeast-2).
+  Deploy and tear down with scripts/aws.py; stack tags (project=olist-pipeline) propagate to the bucket
+  and the workgroup. The Secrets Manager secret is created by the script, so its value never sits in a template.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: olist-pipeline-<account id>-apse2 (built by scripts/aws.py)
+  GlueDatabaseName:
+    Type: String
+    Default: olist_lake
+  WorkGroupName:
+    Type: String
+    Default: olist
+  ScanCutoffBytes:
+    Type: Number
+    Default: 1073741824   # 1 GB per query: a cost guard (the whole lake is ~0.2 GB)
+
+Resources:
+  LakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: landing-to-glacier-ir
+            Status: Enabled
+            Prefix: landing/
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 90
+          - Id: athena-results-expire
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 7
+          - Id: noncurrent-versions-expire
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  LakeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LakeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt LakeBucket.Arn
+              - !Sub "${LakeBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Ref WorkGroupName
+      Description: olist-pipeline queries (results expire after 7 days)
+      RecursiveDeleteOption: true
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: false
+        BytesScannedCutoffPerQuery: !Ref ScanCutoffBytes
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${LakeBucket}/athena-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        Description: olist-pipeline lake (Bronze/Silver/Gold external Parquet tables)
+
+Outputs:
+  BucketName:
+    Value: !Ref LakeBucket
+  WorkGroup:
+    Value: !Ref AthenaWorkGroup
+  GlueDatabase:
+    Value: !Ref GlueDatabase

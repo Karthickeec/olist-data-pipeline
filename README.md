@@ -1,9 +1,16 @@
 # Olist e-commerce pipeline
 
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
-Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
+Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/Athena/Glue/Secrets Manager, Parquet, Bronze/Silver/Gold layers.
 
-**Status: steps 1–7 done locally (sources, Bronze, Silver, DQ, Gold, Airflow). Steps 8–10 (AWS, CI) are planned in [docs/PLAN.md](docs/PLAN.md).**
+**Status: steps 1–8 done (sources, Bronze, Silver, DQ, Gold, Airflow locally; S3 + Athena + Secrets Manager on AWS). Steps 9–10 (Spark on Glue, CI and docs) are planned in [docs/PLAN.md](docs/PLAN.md).**
+
+**AWS region: `ap-southeast-2`.** The AWS account is on the Free plan, and its organization's service control
+policy allows only the project's home region (ap-southeast-2); every other region, and EMR everywhere, is denied.
+So the lake goes to S3 + Athena in ap-southeast-2, and Spark on AWS uses Glue ETL jobs instead of EMR
+(a test job succeeded in step 8).
+Tables stay plain Parquet; Apache Iceberg on the Glue catalog is the documented upgrade path (ACID MERGE,
+time travel, no staging swap).
 
 | Source | What it simulates | Where |
 |---|---|---|
@@ -405,25 +412,112 @@ Verified:
   46,617 orders and 52,575 order lines; 154 Silver table-batches balance; LTV equals fact payments for 44,458 customers.
   DQ found 0 blocking failures over 18 layer-days.
 
+## AWS: S3 lake, Secrets Manager, Athena (step 8)
+
+Everything is in **ap-southeast-2** (the only region the account's Free-plan SCP allows) and tagged
+`project=olist-pipeline`. One CloudFormation stack ([`infra/step8.yaml`](infra/step8.yaml)) holds:
+- **The bucket** `olist-pipeline-<account>-apse2`. The account id is looked up at run time, never committed.
+  - Private (Block Public Access), SSE-S3, versioning, TLS-only policy.
+  - Lifecycle: landing/ to Glacier IR after 90 days; Athena results and noncurrent versions expire after 7 days.
+- **The Athena workgroup** `olist`, with a 1 GB scan cutoff per query.
+- **The Glue database** `olist_lake`.
+
+`scripts/aws.py` creates the secret `olist/pipeline` (Postgres password and API key) separately, so no secret
+value ever sits in a template. A $5/month AWS Budget alerts by email at 50% and 100% of actual spend and at 100%
+of forecast spend.
+
+```bash
+make aws-check            # read-only probes (EMR Serverless shows "SCP deny")
+make aws-up               # stack + secret
+make aws-sync             # first upload of the lake and landing files
+make run-days START=2018-01-07 END=2018-01-09   # local pipeline, DQ proof, publish per day
+make verify-s3-parity     # S3 == local: keys, sizes, MD5/ETags
+make athena-create athena-queries athena-register-partitions
+make athena-check DATE=2018-01-09
+make small-files-experiment
+make aws-down DRY_RUN=1   # teardown preview (see docs/RUNBOOK.md)
+```
+
+**Credentials:**
+- Spark and boto3 use the default AWS credential chain (the local profile); keys never appear in config or Spark conf.
+- With `OLIST_TARGET=aws` (`make … AWS=1`), config values written as `secret://olist/pipeline#pg_password` are read
+  from Secrets Manager once per process.
+- Resolved values are wrapped so that a config dump or traceback shows `'***'` (tested).
+
+### Why compute stays local in this step
+
+The plan was to point the local Spark jobs straight at `s3a://` and run 2018-01-07..09 on S3. Measured from this Mac:
+- **Latency:** a TCP connect to `s3.ap-southeast-2.amazonaws.com` takes about **0.38 s**, and the first response
+  byte arrives after about **1.1 s**.
+- **What that does to Spark:** each Parquet file costs a metadata request, a footer read and a data read. Spark
+  waits on the network, not on CPU or memory.
+- **Bronze** for one day took **330 s** on S3, against about 10 s locally.
+- **Silver** for one day was still running after **51 min** (under a minute locally) and was stopped.
+- **A Spark content comparison** of the whole lake (local vs S3) was stopped after 53 min.
+
+So in step 8:
+- **Compute stays local and S3 is the published copy.** `make run-days` runs each day locally (`local[2]`, 2 GB
+  driver), checks that `pipeline.dq_results` got fresh rows for all three layers with no blocking failures, then
+  runs `aws.py publish`. That's an incremental `aws s3 sync` that also deletes replaced part-files, so S3 keeps
+  exactly the local lake; versioning keeps old objects for 7 days.
+- **Parity is proven from listings,** not by reading data: every local file must exist on S3 with the same key,
+  size and MD5/ETag (multipart ETags are recomputed with the CLI's 8 MiB parts).
+- **Athena reads S3.**
+- **Step 9 moves compute next to the data** (Glue in ap-southeast-2), where these round trips take milliseconds.
+
+The aborted S3 run had already written Bronze and part of Silver for 2018-01-07 (and Postgres had recorded it).
+That was pulled back with `aws s3 sync --delete` first, so the local lake matched the bookkeeping again; the day
+was then rerun locally, which reruns allow.
+
+### Results
+
+| | |
+|---|---|
+| First upload | 4,162 lake files (123.9 MB) + 990 landing files (14.4 MB) in 7.6 min; parity identical in 7.4 s |
+| 2018-01-07 / 08 / 09 | pipeline 130 / 134 / 127 s, publish 25 / 38 / 40 s (104–221 files up, 92–197 replaced files deleted) |
+| DQ per day | Bronze 32, Silver 47, Gold 31 checks, 0 blocking failures (fresh rows checked for every layer) |
+| After 2018-01-09 | S3 identical to local: 4,217 lake files (130.9 MB), 999 landing files; `verify-bronze/silver/gold` pass (53,401 fact lines; LTV = fact payments, R$7,437,125.17 over 45,178 customers) |
+| Athena tables | 31 external Parquet tables (Bronze 11, Silver 11 + 2 quarantine, Gold 7), DDL generated from the Parquet schemas into `sql/athena/` |
+| Athena vs Spark | 7/7 answers identical (fact lines and payments, last-day lines, RFM segments, SCD2 versions, orders by status, Bronze ingest count, quarantine), 1.9 MB scanned in total |
+| KPI named queries | daily revenue by category, RFM segment mix, top sellers, customers who moved state: 0.01–2.4 MB scanned, 0.8–2.5 s each |
+| Partition projection | new days need no registration. Fallback demo: a copy of `silver_orders` without projection returns 0 rows until 385 partitions are added with `ALTER TABLE … ADD IF NOT EXISTS PARTITION`, then 47,358 rows, the same as the projected table |
+| Glue test job | Glue 5.0 (Spark 3.5.4-amzn-0), Flex, 2 × G.1X: read `gold/dim_date` from S3 and wrote a count, SUCCEEDED in 93 s; 171 DPU-seconds = **$0.014** |
+
+**Small files** ([docs/SMALL_FILES.md](docs/SMALL_FILES.md)):
+- Silver/Gold event tables already write one file per partition, but the partitions are daily: about 380 per
+  table, at 4–43 KB per file. `coalesce` or `maxRecordsPerFile` can't help.
+- A monthly copy of the fact table has 16 files of 322 KB instead of 383 files of 21 KB.
+- Athena's full scan went from 1.40 s to 0.47 s (median of 5); a one-month query went from 0.46 s to 0.36 s.
+- The pipeline keeps daily partitions for now (see Known limitations).
+
+**Table format:**
+- Plain Parquet with the staging swap.
+- **Apache Iceberg** on the Glue catalog is the upgrade path: ACID `MERGE INTO` instead of the swap, snapshot
+  time travel, hidden partitioning (which would also fix the small-files issue through compaction) and no
+  dependence on S3 rename semantics.
+
 ## Layout
 
 ```
-docs/                    PLAN.md, SALTING.md
+docs/                    PLAN.md, SALTING.md, SMALL_FILES.md
+infra/                   step8.yaml (CloudFormation), glue_test_job.py
 airflow/dags/            olist_daily DAG (the rest of airflow/ is local state, gitignored)
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
 config/dq/                data-quality suites per layer
 sql/001_schema.sql       source schema (idempotent DDL)
 sql/pipeline/            watermarks, ingest_runs, reference_snapshots, layer_runs, dq_results
+sql/athena/              generated Athena DDL per layer, kpis/ (named queries)
 src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rules),
                          replay, customer_changes, seed, verify,
                          spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
                          api_to_bronze), api/ (activity, app, server, client),
                          silver/ (common, clean, order_lines, job), dq/ (suite, checks, engine),
-                         gold/ (model, job)
+                         gold/ (model, job), aws (secrets, bucket, S3A), athena (catalog, DDL)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
                          api_to_bronze.py, silver.py, gold.py, dq.py, salting_demo.py,
                          verify_bronze.py, verify_silver.py, verify_gold.py, airflow_failure_demo.sh,
-                         reset_source.py
+                         reset_source.py, aws.py, athena.py, run_days.sh, verify_s3_parity.py,
+                         small_files_experiment.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

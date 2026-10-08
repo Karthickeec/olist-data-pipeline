@@ -12,9 +12,22 @@ export AIRFLOW__CORE__EXECUTOR := LocalExecutor
 export AIRFLOW__CORE__LOAD_EXAMPLES := False
 export AIRFLOW__CORE__DAGS_FOLDER := $(CURDIR)/airflow/dags
 export AIRFLOW__CORE__PARALLELISM := 4
+# AWS=1 runs any pipeline target against the S3 lake (ap-southeast-2) with credentials from Secrets Manager.
+ifeq ($(AWS),1)
+export OLIST_TARGET := aws
+endif
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
-        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo airflow-venv airflow-setup airflow airflow-stop backfill verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
+        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo airflow-venv airflow-setup airflow airflow-stop backfill verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset \
+        no-target aws-publish run-days aws-check aws-up aws-sync aws-status aws-glue-test aws-down verify-s3-parity athena-ddl athena-create \
+        athena-queries athena-check athena-register-partitions small-files-experiment
+
+# A bare `make` (or a mistyped `make "dq LAYER=bronze"`, which make reads as a variable assignment with
+# no target) must not look like a successful run: show the targets, then fail.
+.DEFAULT_GOAL := no-target
+no-target:
+	@$(MAKE) --no-print-directory help
+	@echo "error: no target given (did you quote a target and its variables together?)" >&2; exit 2
 
 help:  ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -137,6 +150,51 @@ airflow-stop:  ## Stop Airflow standalone
 backfill:  ## (Re)run days: make backfill START=2018-01-03 END=2018-01-03 [REPROCESS=completed] (Airflow running, DAG unpaused)
 	$(AIRFLOW) backfill create --dag-id olist_daily --from-date $(START) --to-date $(END) --max-active-runs 1 \
 		--reprocess-behavior $(or $(REPROCESS),none)
+
+aws-check:  ## Read-only probes of the AWS services the project uses (ap-southeast-2)
+	$(PY) scripts/aws.py check
+
+aws-up:  ## Deploy the Step 8 stack (S3 bucket, Athena workgroup, Glue database) and the secret
+	$(PY) scripts/aws.py up
+
+aws-sync:  ## Upload the local lake and landing files to S3
+	$(PY) scripts/aws.py sync
+
+aws-status:  ## Stack, bucket usage and every resource tagged project=olist-pipeline
+	$(PY) scripts/aws.py status
+
+aws-publish:  ## Incremental upload of the local lake + landing to S3 (deletes replaced files on S3)
+	$(PY) scripts/aws.py publish
+
+run-days:  ## Local pipeline + DQ check + publish to S3 per day: make run-days START=2018-01-07 END=2018-01-09
+	./scripts/run_days.sh $(START) $(END)
+
+aws-glue-test:  ## Run the smallest Glue Spark job (Flex, 2 x G.1X, 5-min timeout; about $0.02)
+	$(PY) scripts/aws.py glue-test
+
+aws-down:  ## Teardown: pull the lake back, delete Glue test, secret, bucket and stack (DRY_RUN=1 to preview)
+	$(PY) scripts/aws.py down $(if $(DRY_RUN),--dry-run)
+
+verify-s3-parity:  ## S3 holds exactly the local lake and landing files (keys, sizes, MD5/ETags)
+	$(PY) scripts/verify_s3_parity.py
+
+small-files-experiment:  ## Daily vs monthly partitions of the fact table on Athena -> docs/SMALL_FILES.md
+	$(PY) scripts/small_files_experiment.py
+
+athena-ddl:  ## Regenerate sql/athena/<layer>/*.sql from the local lake's Parquet schemas
+	$(PY) scripts/athena.py ddl
+
+athena-create:  ## (Re)create the Athena tables in the Glue database
+	$(PY) scripts/athena.py create
+
+athena-queries:  ## Save and run the Gold KPI queries (sql/athena/kpis)
+	$(PY) scripts/athena.py queries
+
+athena-check:  ## Athena answers equal Spark answers on the S3 lake: make athena-check DATE=2018-01-09
+	$(PY) scripts/athena.py check --date $(DATE)
+
+athena-register-partitions:  ## Fallback without partition projection: register partitions, compare counts
+	$(PY) scripts/athena.py register-partitions
 
 test:  ## All tests (integration tests skip if Postgres is down)
 	$(PY) -m pytest -q

@@ -20,7 +20,18 @@ customer_changes:
   dirty_rate: 0.05  # share of requests that are deliberately malformed
 
 lake:
-  root: data/lake  # local path (relative to repo root) or a URI such as s3://bucket/prefix
+  root: data/lake  # local path (relative to repo root) or a URI such as s3a://bucket/prefix
+
+aws:
+  # The only region this project can use: the account is on the AWS Free plan, and its organization's
+  # service control policy allows only the project's home region (ap-southeast-2). Other regions are denied.
+  region: ap-southeast-2
+  bucket_prefix: olist-pipeline   # bucket = <prefix>-<account id>-apse2, resolved at runtime (not committed)
+  glue_database: olist_lake
+  athena_workgroup: olist
+  secret_id: olist/pipeline       # Secrets Manager secret holding pg_password and api_key
+  tags:
+    project: olist-pipeline
 
 spark:
   master: local[2]
@@ -32,7 +43,8 @@ spark:
 
 api:
   base_url: http://127.0.0.1:8000
-  key_env: OLIST_API_KEY      # env var holding the API key (server and client); Secrets Manager later
+  key_env: OLIST_API_KEY      # env var holding the API key (server and client)
+  key: ""                     # when set (secret://olist/pipeline#api_key on AWS), the client uses it instead
   page_size: 200
   timeout_seconds: 10
   max_attempts: 5             # per request, then the run fails

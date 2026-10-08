@@ -4,4 +4,5 @@ pyspark==3.5.9
 fastapi==0.141.1
 uvicorn==0.53.0
 httpx==0.28.1
+boto3==1.43.110
 pytest>=8,<9
