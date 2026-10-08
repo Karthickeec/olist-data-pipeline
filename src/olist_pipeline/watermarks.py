@@ -89,3 +89,53 @@ class Bookkeeping:
             "ON CONFLICT (source, table_name, batch_date) DO UPDATE SET "
             "content_hash = excluded.content_hash, row_count = excluded.row_count, written_at = now()"
         ).format(self._t("reference_snapshots")), (source, table, batch_date, content_hash, rows))
+
+
+@dataclass(frozen=True)
+class IngestRange:
+    """Bronze partitions (ingest_date) a layer batch processes: (low, high]. low None = all."""
+    low: date | None
+    high: date
+
+    def __str__(self) -> str:
+        return f"({self.low or '-inf'}, {self.high}]"
+
+
+@dataclass
+class LayerRun:
+    rows_in: int = 0
+    rows_valid: int = 0
+    rows_quarantined: int = 0
+    rows_duplicate: int = 0
+    rows_written: int = 0
+    rows_pending: int = 0
+    detail: str = ""
+
+
+def layer_range(book: Bookkeeping, layer: str, table: str, batch_date: date,
+                full_refresh: bool = False) -> IngestRange:
+    if full_refresh:
+        return IngestRange(None, batch_date)
+    row = book.conn.execute(
+        sql.SQL("SELECT to_ingest_date FROM {} WHERE layer = %s AND table_name = %s AND batch_date < %s "
+                "ORDER BY batch_date DESC LIMIT 1").format(book._t("layer_runs")),
+        (layer, table, batch_date),
+    ).fetchone()
+    return IngestRange(row[0] if row else None, batch_date)
+
+
+def record_layer_run(book: Bookkeeping, layer: str, table: str, batch_date: date,
+                     rng: IngestRange, run: LayerRun) -> None:
+    book.conn.execute(sql.SQL(
+        "INSERT INTO {} (layer, table_name, batch_date, from_ingest_date, to_ingest_date, rows_in, "
+        "rows_valid, rows_quarantined, rows_duplicate, rows_written, rows_pending, detail) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (layer, table_name, batch_date) DO UPDATE SET "
+        "from_ingest_date = excluded.from_ingest_date, to_ingest_date = excluded.to_ingest_date, "
+        "rows_in = excluded.rows_in, rows_valid = excluded.rows_valid, "
+        "rows_quarantined = excluded.rows_quarantined, rows_duplicate = excluded.rows_duplicate, "
+        "rows_written = excluded.rows_written, rows_pending = excluded.rows_pending, "
+        "detail = excluded.detail, finished_at = now()"
+    ).format(book._t("layer_runs")), (layer, table, batch_date, rng.low, rng.high, run.rows_in,
+                                      run.rows_valid, run.rows_quarantined, run.rows_duplicate,
+                                      run.rows_written, run.rows_pending, run.detail))

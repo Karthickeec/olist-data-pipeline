@@ -3,7 +3,7 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
 
-**Status: step 3 done. Step 1: simulated source systems. Step 2: Bronze ingestion with PySpark. Step 3: REST API source and api_to_bronze.**
+**Status: step 4 done (Silver). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
 
 | Source | What it simulates | Where |
 |---|---|---|
@@ -36,6 +36,9 @@ make bronze DATE=2017-02-28   # first run = initial load
 make api                      # in a second terminal: the mock customer-activity API
 make daily DATE=2017-03-01    # replay one day, then Postgres, files and API into Bronze
 make bronze-api DATE=2017-03-01
+make silver DATE=2017-03-01       # Bronze -> Silver (also part of make daily)
+make verify-silver               # Silver vs Postgres, accounting, quarantine vs injected dirt
+make verify-silver-idempotency DATE=2017-03-04
 make verify-bronze            # Bronze vs Postgres and landing files
 ```
 
@@ -179,18 +182,71 @@ Example retry from a real run:
 Because the API is a pure function of the date, reruns are always identical: the same landing bytes
 and the same Bronze rows apart from `_ingested_at`, even when different requests failed and were retried.
 
+## Silver (step 4)
+
+`make silver DATE=D` builds typed, cleaned, deduplicated tables in `<lake>/silver/<table>/`:
+
+| Table | Partitioned by | Built from |
+|---|---|---|
+| orders, order_items, order_payments | `order_purchase_date` | Postgres Bronze (items and payments take the order's date) |
+| order_reviews | `review_date` | Postgres Bronze |
+| customers, products, sellers, geolocation | none | Postgres Bronze (reference tables from the latest snapshot) |
+| customer_changes | `requested_date` | CRM files |
+| customer_activity | `activity_date` | API |
+| order_lines | `order_purchase_date` | orders + items + payments (per order) + customers + products + sellers |
+
+- **Incremental:** each table processes the Bronze partitions in `(last processed, D]` (`pipeline.layer_runs`),
+  so normal days, catch-up batches and reruns use one rule. Reference tables are rebuilt only when a new
+  snapshot arrived.
+- **Latest row per key:** `row_number()` over the key, ordered by `updated_at`, then Bronze partition, then
+  processing time. **Merge** on plain Parquet works like this: read the touched partitions, union, keep the latest per key,
+  write to `_staging`, then swap partitions in. `--full-refresh` rebuilds from Bronze.
+- **Cleaning:**
+  - **States:** trimmed, uppercased, and full names mapped to codes (`São Paulo` → `SP`).
+  - **Cities:** a null city is filled from geolocation by zip prefix.
+  - **Timestamps:** both API formats (ISO `…Z` and `dd/MM/yyyy HH:mm:ss`) are parsed.
+  - **Counts:** cast to int.
+  - **Duplicates:** CRM duplicates collapse on `change_id`.
+  - **Categories:** every product gets an English category (2 manual translations, blank → `unknown`).
+  - **Geolocation:** one row per zip prefix (19,015) with exact median lat/lng and the most common city/state.
+  - **Column names:** the source typos are fixed (`product_name_lenght` → `product_name_length`).
+- **Quarantine, not drop:** rows that can't be fixed go to `silver/_quarantine/<table>/batch_date=D/` with all
+  original columns plus `_reason` (`negative_sessions`, `unknown_customer`, `invalid_state`, `unparseable_timestamp`,
+  `corrupt_record`, …).
+- **Late-arriving rows:** an item or payment whose order is not in Silver yet (e.g. the order's newer version
+  landed in a later Bronze partition) waits in `silver/_pending/` and is retried each batch for 7 days before
+  being quarantined as an orphan. On the real data, 41 items and 38 payments from 2017-03-02 waited one batch
+  and resolved on 03-03.
+- **As-of lookups:** every Silver row carries `_first_batch_date`, and a batch only treats parents first seen
+  by that batch as known. That keeps reruns of old days identical even after later batches have run.
+- **`order_lines`:** one row per item, with payments aggregated per order. The aggregate is also split across lines
+  (`allocated_payment`, to the cent, the last line takes the remainder), so summing lines never double-counts payments.
+  Customers, products and sellers are broadcast (small). Items ⋈ orders ⋈ payments use sort-merge joins, scoped
+  to the rebuilt partitions. The reasons are written as comments in `silver/order_lines.py`.
+- **Row accounting:** every table-batch satisfies `rows_in = valid + quarantined + duplicate + pending`
+  (asserted in the job and checked by `make verify-silver`).
+
+Verified on 2017-02-28..03-06:
+- Silver equals Postgres for all 5 transactional tables (3,413 orders, 3,827 items).
+- 77 table-batches balance.
+- `order_lines` allocations sum exactly to each order's payments (3,316 orders).
+- Quarantine counts equal the dirt counted independently from the landing files.
+- Reruns of 03-02 and 03-04 leave every Silver, quarantine and pending area unchanged.
+
 ## Layout
 
 ```
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
 sql/001_schema.sql       source schema (idempotent DDL)
-sql/pipeline/            watermarks, ingest_runs, reference_snapshots
+sql/pipeline/            watermarks, ingest_runs, reference_snapshots, layer_runs
 src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rules),
                          replay, customer_changes, seed, verify,
                          spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
-                         api_to_bronze), api/ (activity, app, server, client)
+                         api_to_bronze), api/ (activity, app, server, client),
+                         silver/ (common, clean, order_lines, job)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
-                         api_to_bronze.py, verify_bronze.py, reset_source.py
+                         api_to_bronze.py, silver.py, verify_bronze.py, verify_silver.py,
+                         reset_source.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

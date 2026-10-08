@@ -54,6 +54,11 @@ first (8 GB Mac) and moved to AWS (S3, EMR, Athena) afterwards.
 
 ## Step 4: Silver (Bronze → Silver, PySpark)
 
+- [x] **Done.**
+  - **Verified on 2017-02-28..03-06:** Silver = Postgres for all 5 transactional tables (3,413 orders, 3,827 items, 3,615 payments, 2,252 reviews); 77 table-batches balance; geolocation 19,015 prefixes; `order_lines` 3,827 lines with allocations exact for 3,316 orders; quarantine equals the injected dirt (3 negative-session API records); reruns of 03-02 and 03-04 unchanged.
+  - **Tests:** 85.
+  - **Added beyond the plan:** a `_pending` area for late-arriving children (41 items and 38 payments from 03-02 resolved on 03-03); `_first_batch_date` with as-of lookups so reruns after later batches stay identical; reviews partitioned by `review_date`.
+
 **Goal:** typed, cleaned, deduplicated tables; bad rows quarantined, never dropped; one joined
 `order_lines` table; incremental and idempotent.
 
@@ -64,7 +69,7 @@ first (8 GB Mac) and moved to AWS (S3, EMR, Athena) afterwards.
 | orders | order_id | `order_purchase_date` | latest version per key |
 | order_items | (order_id, order_item_id) | `order_purchase_date` (from the order) | same partitions as orders, so they join partition by partition |
 | order_payments | (order_id, payment_sequential) | `order_purchase_date` | |
-| order_reviews | (review_id, order_id) | `review_creation_date` | |
+| order_reviews | (review_id, order_id) | `review_date` (date of `review_creation_date`) | |
 | customers | customer_id | none (≈99k rows) | keeps `customer_unique_id` |
 | products | product_id | none | English category; manual names for `pc_gamer` and `portateis_cozinha_e_preparadores_de_alimentos`; blank → `unknown` |
 | sellers | seller_id | none | |

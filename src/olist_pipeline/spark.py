@@ -30,6 +30,8 @@ def build_spark(cfg: dict, app_name: str = "olist-pipeline") -> SparkSession:
         .config("spark.executor.extraJavaOptions", UTC_JVM)
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
+        # Unparseable timestamps become null instead of raising (Silver quarantines them).
+        .config("spark.sql.legacy.timeParserPolicy", "CORRECTED")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
