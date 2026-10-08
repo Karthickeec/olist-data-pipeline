@@ -3,12 +3,12 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/Athena/Glue/Secrets Manager, Parquet, Bronze/Silver/Gold layers.
 
-**Status: steps 1–8 done (sources, Bronze, Silver, DQ, Gold, Airflow locally; S3 + Athena + Secrets Manager on AWS). Steps 9–10 (Spark on Glue, CI and docs) are planned in [docs/PLAN.md](docs/PLAN.md).**
+**Status: steps 1–9 done (sources, Bronze, Silver, DQ, Gold, Airflow locally; S3 + Athena + Secrets Manager + Spark on Glue in AWS). Step 10 (CI and docs) is planned in [docs/PLAN.md](docs/PLAN.md).**
 
 **AWS region: `ap-southeast-2`.** The AWS account is on the Free plan, and its organization's service control
 policy allows only the project's home region (ap-southeast-2); every other region, and EMR everywhere, is denied.
-So the lake goes to S3 + Athena in ap-southeast-2, and Spark on AWS uses Glue ETL jobs instead of EMR
-(a test job succeeded in step 8).
+So the lake goes to S3 + Athena in ap-southeast-2, and Spark on AWS runs as Glue ETL jobs instead of EMR
+(step 9).
 Tables stay plain Parquet; Apache Iceberg on the Glue catalog is the documented upgrade path (ACID MERGE,
 time travel, no staging swap).
 
@@ -496,12 +496,75 @@ was then rerun locally, which reruns allow.
   time travel, hidden partitioning (which would also fix the small-files issue through compaction) and no
   dependence on S3 rename semantics.
 
+## Spark on AWS Glue, orchestrated by Airflow (step 9)
+
+EMR and EMR Serverless are denied by the account's Free-plan SCP, so Spark on AWS runs as **AWS Glue ETL**
+jobs. One job, `olist-spark` (Glue 5.0 = Spark 3.5.4 / Python 3.11, **Flex**, 2 × G.1X, timeout 30 min,
+MaxConcurrentRuns 1), takes `--TASK silver|gold|dq_silver|dq_gold` and `--DATE`.
+- `make glue-deploy` builds the project wheel and uploads it with [`infra/glue_job.py`](infra/glue_job.py) and
+  the DQ suites.
+- The wheel is installed with `--additional-python-modules`.
+- The job runs the **same** `SilverJob`, `GoldJob` and DQ `Runner` code as the local runs.
+
+**Control plane local, data plane on AWS.** Sources and Bronze stay local, because Postgres stays local by
+choice (no RDS). Glue can't reach Postgres either, so the bookkeeping travels as JSON
+([`olist_pipeline/control.py`](src/olist_pipeline/control.py)):
+1. **`glue_run.py export`** writes the latest layer run per table and the latest DQ observation per check
+   (before the batch date) to `s3://…/control/<task>/<date>/state.json`.
+2. **The Glue job** uses a `FileBook` with the same interface as the Postgres `Bookkeeping`. It writes what it
+   would have recorded (layer runs, DQ results) to `output.json`.
+3. **`glue_run.py import`** writes those records into Postgres, logs DPU-seconds and cost to
+   `data/glue_runs.jsonl`, and fails on blocking DQ failures.
+
+The DAG [`olist_daily_aws`](airflow/dags/olist_daily_aws.py):
+
+```
+api_up, replay -> bronze_postgres, bronze_files, bronze_api -> dq_bronze -> publish_bronze
+  -> export_silver -> glue_silver -> import_silver -> export_dq_silver -> glue_dq_silver -> import_dq_silver
+  -> export_gold -> glue_gold -> import_gold -> export_dq_gold -> glue_dq_gold -> import_dq_gold -> pull_lake
+```
+
+- **Glue tasks:** `GlueJobOperator` from the Amazon provider, installed into `.venv-airflow` with the official
+  constraints. They pass only task and date; the job derives its S3 paths from its own defaults, so the bucket
+  name and account id never appear in Airflow.
+- **`publish_bronze` / `pull_lake`:** incremental `aws s3 sync` in each direction, so the local lake keeps
+  matching S3.
+- **Concurrent-run race:**
+  - A Glue run that has just SUCCEEDED still counts against MaxConcurrentRuns=1 for a few seconds.
+  - On 2018-01-11 the next `StartJobRun` twice failed with `ConcurrentRunsExceededException` (the retries
+    absorbed it).
+  - The Glue tasks now use `sleep_before_return=30`; 2018-01-12 ran without a single retry.
+
+```bash
+make glue-deploy
+make glue-run TASK=silver DATE=2018-01-10      # one task without Airflow (export, run, wait, import)
+OLIST_AWS_DAG_START=2018-01-11 OLIST_AWS_DAG_END=2018-01-12 make airflow   # then unpause olist_daily_aws
+```
+
+### Results
+
+| | |
+|---|---|
+| Glue output = local Spark output | 2018-01-10 ran Silver and Gold on Glue, then `verify-silver-idempotency` / `verify-gold-idempotency` reran the day locally and compared contents: all 11 Silver tables + pending/quarantine and all 7 Gold tables identical (e.g. 53,718 order lines, 47,465 SCD2 versions, 487,051 metric rows) |
+| Airflow on Glue | `olist_daily_aws` caught up 2018-01-11 and 01-12: both succeeded (20.3 and 22.6 min) |
+| Task times (avg) | glue_silver 329 s, glue_gold 296 s, glue_dq_silver 250 s, glue_dq_gold 234 s (Flex start-up included); publish 25 s, pull 21 s |
+| DQ on Glue | Silver 47 and Gold 31 checks per day, 0 blocking failures, imported into `pipeline.dq_results` |
+| After 2018-01-12 | `verify-bronze/silver/gold` pass (54,307 fact lines; LTV = fact payments, R$7,565,259.72 over 45,933 customers); S3 = local (4,511 lake + 1,008 landing files, keys/sizes/ETags); Athena = Spark 7/7 |
+| Cost | 12 Glue runs, 4,903 DPU-seconds billed in total: **$0.395** (about $0.13 per day: Silver $0.04–0.06, Gold $0.03, each DQ suite $0.02–0.03); plus the step-8 test job $0.014 |
+
+The parity check had to learn one thing: Glue (EMRFS) uploads even small files as one-part multipart uploads,
+so their ETag is `md5(md5(file))-1`, not the file's MD5. Keys and sizes matched and the bytes were the same.
+
+**Why not Glue for Bronze too:** Bronze reads the local Postgres (JDBC), the local landing files and the
+local mock API. Moving it would mean RDS and a hosted API: more cost and setup for no change in the Spark logic.
+
 ## Layout
 
 ```
 docs/                    PLAN.md, SALTING.md, SMALL_FILES.md
-infra/                   step8.yaml (CloudFormation), glue_test_job.py
-airflow/dags/            olist_daily DAG (the rest of airflow/ is local state, gitignored)
+infra/                   step8.yaml (CloudFormation), glue_job.py (Glue entry point), glue_test_job.py
+airflow/dags/            olist_daily (local), olist_daily_aws (Glue), olist_common (shared helpers);
+                         the rest of airflow/ is local state, gitignored
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
 config/dq/                data-quality suites per layer
 sql/001_schema.sql       source schema (idempotent DDL)
@@ -512,12 +575,13 @@ src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rul
                          spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
                          api_to_bronze), api/ (activity, app, server, client),
                          silver/ (common, clean, order_lines, job), dq/ (suite, checks, engine),
-                         gold/ (model, job), aws (secrets, bucket, S3A), athena (catalog, DDL)
+                         gold/ (model, job), aws (secrets, bucket, S3A), athena (catalog, DDL),
+                         control (Glue bookkeeping)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
                          api_to_bronze.py, silver.py, gold.py, dq.py, salting_demo.py,
                          verify_bronze.py, verify_silver.py, verify_gold.py, airflow_failure_demo.sh,
                          reset_source.py, aws.py, athena.py, run_days.sh, verify_s3_parity.py,
-                         small_files_experiment.py
+                         small_files_experiment.py, glue_run.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

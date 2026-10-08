@@ -90,3 +90,21 @@ def test_catalog_covers_every_layer():
     names = [t.name for t in TABLES]
     assert len(names) == len(set(names)) == 31
     assert {t.layer for t in TABLES} == {"bronze", "silver", "gold"}
+
+
+def test_s3_parity_etags(tmp_path):
+    """Single-part ETag = MD5; multipart = MD5 of part MD5s + "-n" (CLI 8 MiB parts, Glue one-part uploads)."""
+    import hashlib
+    import importlib.util
+    from olist_pipeline.config import PROJECT_ROOT
+    spec = importlib.util.spec_from_file_location("parity", PROJECT_ROOT / "scripts" / "verify_s3_parity.py")
+    parity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parity)
+    small, big = tmp_path / "small", tmp_path / "big"
+    small.write_bytes(b"x" * 1000)
+    big.write_bytes(bytes(range(256)) * (9 * 1024 * 1024 // 256 + 10))   # just over 9 MiB -> 2 parts of 8 MiB
+    md5 = hashlib.md5(small.read_bytes()).hexdigest()
+    assert parity.etag_matches(small, md5)
+    assert parity.etag_matches(small, hashlib.md5(hashlib.md5(small.read_bytes()).digest()).hexdigest() + "-1")
+    assert parity.etag_matches(big, parity.multipart_etag(big.read_bytes(), 8 * 1024 * 1024))
+    assert not parity.etag_matches(small, "0" * 32)

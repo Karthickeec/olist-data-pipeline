@@ -19,7 +19,7 @@ endif
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
         spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo airflow-venv airflow-setup airflow airflow-stop backfill verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset \
-        no-target aws-publish run-days aws-check aws-up aws-sync aws-status aws-glue-test aws-down verify-s3-parity athena-ddl athena-create \
+        no-target aws-publish run-days glue-deploy glue-run aws-pull aws-check aws-up aws-sync aws-status aws-glue-test aws-down verify-s3-parity athena-ddl athena-create \
         athena-queries athena-check athena-register-partitions small-files-experiment
 
 # A bare `make` (or a mistyped `make "dq LAYER=bronze"`, which make reads as a variable assignment with
@@ -168,6 +168,15 @@ aws-publish:  ## Incremental upload of the local lake + landing to S3 (deletes r
 
 run-days:  ## Local pipeline + DQ check + publish to S3 per day: make run-days START=2018-01-07 END=2018-01-09
 	./scripts/run_days.sh $(START) $(END)
+
+glue-deploy:  ## Build the wheel, upload it with the Glue entry script and DQ suites, create/update job olist-spark
+	$(PY) scripts/aws.py glue-deploy
+
+glue-run:  ## One task on Glue with local bookkeeping: make glue-run TASK=silver DATE=2018-01-10 (silver|gold|dq_silver|dq_gold)
+	$(PY) scripts/glue_run.py run $(TASK) --date $(DATE)
+
+aws-pull:  ## Copy the S3 lake back to the local lake (after Glue jobs wrote to S3)
+	$(PY) scripts/aws.py pull
 
 aws-glue-test:  ## Run the smallest Glue Spark job (Flex, 2 x G.1X, 5-min timeout; about $0.02)
 	$(PY) scripts/aws.py glue-test

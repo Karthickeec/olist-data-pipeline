@@ -3,7 +3,8 @@
 Compares listings instead of reading data through Spark (which costs several S3 round trips per
 file): every local file needs an S3 object with the same key, size and ETag. For a single-part
 upload with SSE-S3 the ETag is the file's MD5; for a multipart upload it is the MD5 of the part
-MD5s plus "-<parts>", computed here with the AWS CLI's default 8 MiB part size.
+MD5s plus "-<parts>". The part size isn't stored, so it is inferred: the AWS CLI uses 8 MiB, and Glue
+(EMRFS) uploads even small files as one-part multipart uploads.
 """
 import hashlib
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 from olist_pipeline.aws import bucket_name, session
 from olist_pipeline.config import load_config
 
-PART_SIZE = 8 * 1024 * 1024   # AWS CLI default multipart_chunksize (and multipart_threshold)
+PART_SIZE = 8 * 1024 * 1024   # AWS CLI default multipart_chunksize
 EXCLUDED_SUFFIXES = (".crc", ".DS_Store")
 
 
@@ -21,13 +22,22 @@ def excluded(rel: str) -> bool:
     return rel.endswith(EXCLUDED_SUFFIXES) or "/_staging/" in f"/{rel}"
 
 
-def local_etag(path: Path) -> str:
-    size = path.stat().st_size
-    with open(path, "rb") as f:
-        if size < PART_SIZE:
-            return hashlib.md5(f.read()).hexdigest()
-        parts = [hashlib.md5(chunk).digest() for chunk in iter(lambda: f.read(PART_SIZE), b"")]
+def multipart_etag(data: bytes, part_size: int) -> str:
+    parts = [hashlib.md5(data[i:i + part_size]).digest() for i in range(0, len(data), part_size)] or [b""]
     return f"{hashlib.md5(b''.join(parts)).hexdigest()}-{len(parts)}"
+
+
+def etag_matches(path: Path, remote: str) -> bool:
+    data = path.read_bytes()
+    if "-" not in remote:
+        return hashlib.md5(data).hexdigest() == remote
+    n = int(remote.rsplit("-", 1)[1])
+    if n == 1:
+        return multipart_etag(data, max(len(data), 1)) == remote
+    mib = 1024 * 1024
+    smallest = -(-len(data) // n)   # the part size must give exactly n parts
+    candidates = {PART_SIZE, *(k * mib for k in (5, 16, 32, 64, 100, 128)), -(-smallest // mib) * mib}
+    return any(multipart_etag(data, c) == remote for c in sorted(candidates) if -(-len(data) // c) == n)
 
 
 def local_files(root: Path) -> dict[str, tuple[int, Path]]:
@@ -48,7 +58,7 @@ def compare(name: str, local: dict, remote: dict) -> int:
     extra = sorted(remote.keys() - local.keys())
     size_diff = sorted(k for k in local.keys() & remote.keys() if local[k][0] != remote[k][0])
     etag_diff = sorted(k for k in local.keys() & remote.keys()
-                       if k not in size_diff and local_etag(local[k][1]) != remote[k][1])
+                       if k not in size_diff and not etag_matches(local[k][1], remote[k][1]))
     size = sum(s for s, _ in local.values())
     bad = len(missing) + len(extra) + len(size_diff) + len(etag_diff)
     print(f"{'PASS' if not bad else 'FAIL'}  {name:8s} local {len(local):5d} files {size / 1e6:7.1f} MB | "

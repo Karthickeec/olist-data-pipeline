@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-import psycopg
-from psycopg import sql
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.errors import AnalysisException
 from pyspark.sql import functions as F
@@ -48,10 +46,10 @@ def lake_path(root: str, name: str) -> str:
 
 
 class Runner:
-    def __init__(self, spark: SparkSession, root: str, suite: Suite, batch_date: date,
-                 conn: psycopg.Connection | None = None, pipeline_schema: str = "pipeline"):
+    def __init__(self, spark: SparkSession, root: str, suite: Suite, batch_date: date, book=None):
+        """book: a Bookkeeping (Postgres), a control.FileBook (Glue), or None (no history)."""
         self.spark, self.root, self.suite, self.batch_date = spark, root, suite, batch_date
-        self.conn, self.pipeline_schema = conn, pipeline_schema
+        self.book = book
         self.tables: dict[str, DataFrame | None] = {}
 
     def table(self, name: str) -> DataFrame | None:
@@ -82,14 +80,9 @@ class Runner:
         return df.filter(F.col(col) <= day)
 
     def previous_observed(self, table: str, check: Check) -> float | None:
-        if self.conn is None:
+        if self.book is None:
             return None
-        row = self.conn.execute(sql.SQL(
-            "SELECT observed FROM {} WHERE layer = %s AND table_name = %s AND check_name = %s "
-            "AND batch_date < %s AND observed IS NOT NULL ORDER BY batch_date DESC LIMIT 1"
-        ).format(sql.Identifier(self.pipeline_schema, "dq_results")),
-            (self.suite.layer, table, check.name, self.batch_date)).fetchone()
-        return float(row[0]) if row else None
+        return self.book.previous_observed(self.suite.layer, table, check.name, self.batch_date)
 
     def run_check(self, tc: TableChecks, df: DataFrame, check: Check) -> C.CheckOutcome:
         scoped = self.scoped(df, check.scope or tc.scope)
@@ -134,21 +127,12 @@ class Runner:
         return results
 
 
-def record(conn: psycopg.Connection, schema: str, layer: str, batch_date: date, results: list[Result],
-           tables: set[str]) -> None:
+def record(book, layer: str, batch_date: date, results: list[Result], tables: set[str]) -> None:
     """Replace this batch's results for the tables that ran."""
-    t = sql.Identifier(schema, "dq_results")
-    with conn.transaction():
-        conn.execute(sql.SQL("DELETE FROM {} WHERE batch_date = %s AND layer = %s AND table_name = ANY(%s)")
-                     .format(t), (batch_date, layer, sorted(tables)))
-        with conn.cursor() as cur:
-            cur.executemany(sql.SQL(
-                "INSERT INTO {} (batch_date, layer, table_name, check_name, check_type, severity, status, "
-                "failed_rows, observed, sample, message) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            ).format(t), [(batch_date, layer, r.table, r.check.name, r.check.type, r.check.severity, r.status,
-                           r.outcome.failed_rows, r.outcome.observed,
-                           json.dumps(r.outcome.sample, default=str) if r.outcome.sample else None,
-                           r.outcome.message or None) for r in results])
+    book.record_dq(layer, batch_date, [
+        (r.table, r.check.name, r.check.type, r.check.severity, r.status, r.outcome.failed_rows, r.outcome.observed,
+         json.dumps(r.outcome.sample, default=str) if r.outcome.sample else None, r.outcome.message or None)
+        for r in results], tables)
 
 
 def report(results: list[Result], layer: str, batch_date: date) -> None:
@@ -171,8 +155,8 @@ def run_layer(spark: SparkSession, cfg: dict, layer: str, batch_date: date, suit
     with connect(cfg["pg"]) as conn:
         book = Bookkeeping(conn, cfg["pg"]["pipeline_schema"])
         book.ensure_schema()
-        results = Runner(spark, cfg["lake"]["root"], suite, batch_date, conn, book.schema).run(only)
-        record(conn, book.schema, layer, batch_date, results, {r.table for r in results})
+        results = Runner(spark, cfg["lake"]["root"], suite, batch_date, book).run(only)
+        record(book, layer, batch_date, results, {r.table for r in results})
     report(results, layer, batch_date)
     return results
 

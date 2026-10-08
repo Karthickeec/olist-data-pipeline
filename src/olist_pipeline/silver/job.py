@@ -89,13 +89,10 @@ class SilverJob:
         """
         if self.full_refresh:
             return None
-        row = self.book.conn.execute(
-            f"SELECT max(batch_date) FROM {self.book.schema}.layer_runs "
-            "WHERE layer = %s AND table_name = %s AND batch_date < %s",
-            (LAYER, table, self.batch_date)).fetchone()
-        if row[0] is None:
+        prev = self.book.last_layer_run(LAYER, table, self.batch_date)
+        if prev is None:
             return None
-        path = f"{pending_dir(self.root, table)}/batch_date={row[0].isoformat()}"
+        path = f"{pending_dir(self.root, table)}/batch_date={prev[0].isoformat()}"
         return self.spark.read.parquet(path) if path_exists(self.spark, path) else None
 
     def write_outputs(self, table: str, quarantined: DataFrame, pending: DataFrame) -> tuple[int, int]:

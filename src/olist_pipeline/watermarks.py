@@ -37,6 +37,50 @@ class Bookkeeping:
     def _t(self, name: str) -> sql.Identifier:
         return sql.Identifier(self.schema, name)
 
+    # --- layer and DQ bookkeeping (same interface as control.FileBook) ---------------------
+    def last_layer_run(self, layer: str, table: str, before: date) -> tuple[date, date | None] | None:
+        """(batch_date, to_ingest_date) of the latest batch of layer/table before `before`."""
+        row = self.conn.execute(
+            sql.SQL("SELECT batch_date, to_ingest_date FROM {} WHERE layer = %s AND table_name = %s "
+                    "AND batch_date < %s ORDER BY batch_date DESC LIMIT 1").format(self._t("layer_runs")),
+            (layer, table, before)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def record_layer(self, layer: str, table: str, batch_date: date, rng: "IngestRange", run: "LayerRun") -> None:
+        self.conn.execute(sql.SQL(
+            "INSERT INTO {} (layer, table_name, batch_date, from_ingest_date, to_ingest_date, rows_in, "
+            "rows_valid, rows_quarantined, rows_duplicate, rows_written, rows_pending, detail) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (layer, table_name, batch_date) DO UPDATE SET "
+            "from_ingest_date = excluded.from_ingest_date, to_ingest_date = excluded.to_ingest_date, "
+            "rows_in = excluded.rows_in, rows_valid = excluded.rows_valid, "
+            "rows_quarantined = excluded.rows_quarantined, rows_duplicate = excluded.rows_duplicate, "
+            "rows_written = excluded.rows_written, rows_pending = excluded.rows_pending, "
+            "detail = excluded.detail, finished_at = now()"
+        ).format(self._t("layer_runs")), (layer, table, batch_date, rng.low, rng.high, run.rows_in,
+                                          run.rows_valid, run.rows_quarantined, run.rows_duplicate,
+                                          run.rows_written, run.rows_pending, run.detail))
+
+    def previous_observed(self, layer: str, table: str, check_name: str, before: date) -> float | None:
+        row = self.conn.execute(sql.SQL(
+            "SELECT observed FROM {} WHERE layer = %s AND table_name = %s AND check_name = %s "
+            "AND batch_date < %s AND observed IS NOT NULL ORDER BY batch_date DESC LIMIT 1"
+        ).format(self._t("dq_results")), (layer, table, check_name, before)).fetchone()
+        return float(row[0]) if row else None
+
+    def record_dq(self, layer: str, batch_date: date, rows: list[tuple], tables: set[str]) -> None:
+        """Replace this batch's DQ results for `tables`. rows: (table, check_name, check_type, severity,
+        status, failed_rows, observed, sample_json, message)."""
+        t = self._t("dq_results")
+        with self.conn.transaction():
+            self.conn.execute(sql.SQL("DELETE FROM {} WHERE batch_date = %s AND layer = %s AND table_name = ANY(%s)")
+                              .format(t), (batch_date, layer, sorted(tables)))
+            with self.conn.cursor() as cur:
+                cur.executemany(sql.SQL(
+                    "INSERT INTO {} (batch_date, layer, table_name, check_name, check_type, severity, status, "
+                    "failed_rows, observed, sample, message) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                ).format(t), [(batch_date, layer, *r) for r in rows])
+
     def window(self, source: str, table: str, batch_date: date) -> Window:
         """Low bound = high_wm of the latest successful batch before batch_date.
 
@@ -112,30 +156,16 @@ class LayerRun:
     detail: str = ""
 
 
-def layer_range(book: Bookkeeping, layer: str, table: str, batch_date: date,
-                full_refresh: bool = False) -> IngestRange:
+def layer_range(book, layer: str, table: str, batch_date: date, full_refresh: bool = False) -> IngestRange:
+    """(low, high] of Bronze ingest dates for a layer batch: low = what the previous batch reached.
+
+    `book` is a Bookkeeping (Postgres) or a control.FileBook (a job on Glue, which can't reach Postgres).
+    """
     if full_refresh:
         return IngestRange(None, batch_date)
-    row = book.conn.execute(
-        sql.SQL("SELECT to_ingest_date FROM {} WHERE layer = %s AND table_name = %s AND batch_date < %s "
-                "ORDER BY batch_date DESC LIMIT 1").format(book._t("layer_runs")),
-        (layer, table, batch_date),
-    ).fetchone()
-    return IngestRange(row[0] if row else None, batch_date)
+    prev = book.last_layer_run(layer, table, batch_date)
+    return IngestRange(prev[1] if prev else None, batch_date)
 
 
-def record_layer_run(book: Bookkeeping, layer: str, table: str, batch_date: date,
-                     rng: IngestRange, run: LayerRun) -> None:
-    book.conn.execute(sql.SQL(
-        "INSERT INTO {} (layer, table_name, batch_date, from_ingest_date, to_ingest_date, rows_in, "
-        "rows_valid, rows_quarantined, rows_duplicate, rows_written, rows_pending, detail) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (layer, table_name, batch_date) DO UPDATE SET "
-        "from_ingest_date = excluded.from_ingest_date, to_ingest_date = excluded.to_ingest_date, "
-        "rows_in = excluded.rows_in, rows_valid = excluded.rows_valid, "
-        "rows_quarantined = excluded.rows_quarantined, rows_duplicate = excluded.rows_duplicate, "
-        "rows_written = excluded.rows_written, rows_pending = excluded.rows_pending, "
-        "detail = excluded.detail, finished_at = now()"
-    ).format(book._t("layer_runs")), (layer, table, batch_date, rng.low, rng.high, run.rows_in,
-                                      run.rows_valid, run.rows_quarantined, run.rows_duplicate,
-                                      run.rows_written, run.rows_pending, run.detail))
+def record_layer_run(book, layer: str, table: str, batch_date: date, rng: IngestRange, run: LayerRun) -> None:
+    book.record_layer(layer, table, batch_date, rng, run)

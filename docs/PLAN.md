@@ -409,6 +409,30 @@ appear in logs or config dumps.
 | **Total for Step 8, kept for up to one month** | | | **≈ $0.60, worst case < $1 (of the $100 credit)** |
 
 ### Step 9: Spark on AWS Glue ETL (EMR is blocked by the Free plan)
+
+- [x] **Done.**
+  - **What runs where:**
+    - Silver, Gold and their DQ run as one Glue job (`olist-spark`, Glue 5.0 Flex, 2 × G.1X) with the
+      project wheel.
+    - Sources and Bronze stay local and are published to S3.
+    - Bookkeeping travels as JSON: export → Glue `FileBook` → import (`olist_pipeline/control.py`).
+    - The Airflow DAG `olist_daily_aws` uses `GlueJobOperator`.
+  - **Verified:**
+    - 2018-01-10 Glue output identical to a local rerun: 11 Silver tables + pending/quarantine, 7 Gold tables.
+    - 2018-01-11/12 via Airflow, both successful (20.3 / 22.6 min).
+    - DQ 47 + 31 checks per day, 0 blocking.
+    - `verify-bronze/silver/gold` pass through 01-12 (54,307 fact lines; LTV = payments, R$7,565,259.72).
+    - S3 = local (4,511 + 1,008 files); Athena = Spark 7/7.
+    - Tests: 118.
+  - **Cost:** 12 Glue runs, 4,903 DPU-s = $0.395 (about $0.13 per day).
+  - **Deviations:**
+    - **One generic job instead of one per task.**
+    - **Bookkeeping exported and imported as JSON;** this wasn't in the plan, which assumed the job could
+      record directly.
+    - **`sleep_before_return=30` on the Glue tasks,** after `ConcurrentRunsExceededException` right after a
+      finished run.
+    - **The parity check accepts one-part multipart ETags** (written by Glue).
+    - **`requires-python` lowered to >=3.11** for Glue 5.0 (the code already compiled under 3.11).
 - **Read-only check (2026-10-09):** `glue get-jobs`, `list-jobs`, `get-job-runs`, `list-sessions`,
   `get-crawlers` and `get-connections` all succeed in ap-southeast-2. Read access doesn't prove that
   `CreateJob`/`StartJobRun` are allowed, so a single test job comes first.

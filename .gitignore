@@ -19,3 +19,5 @@ __pycache__/
 airflow/*
 !airflow/dags/
 airflow/dags/__pycache__/
+dist/
+build/
