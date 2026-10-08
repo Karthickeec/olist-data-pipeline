@@ -7,7 +7,7 @@ OLIST_API_KEY ?= dev-local-key
 export OLIST_API_KEY
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
-        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh daily verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
+        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh dq daily verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
 
 help:  ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -74,11 +74,16 @@ silver:  ## Bronze -> Silver for one batch date: make silver DATE=2017-03-01
 silver-full-refresh:  ## Rebuild every Silver table from all Bronze up to DATE
 	$(PY) scripts/silver.py --date $(DATE) --full-refresh
 
-daily: api-health  ## One simulated day: replay DATE, Bronze (Postgres, files, API), then Silver
+dq:  ## Data-quality checks for a layer: make dq LAYER=silver DATE=2017-03-01 (exit 1 on errors)
+	$(PY) scripts/dq.py --layer $(LAYER) --date $(DATE)
+
+daily: api-health  ## One simulated day: replay, Bronze (Postgres, files, API), DQ, Silver, DQ
 	$(MAKE) replay DATE=$(DATE)
 	$(MAKE) bronze DATE=$(DATE)
 	$(MAKE) bronze-api DATE=$(DATE)
+	$(MAKE) dq LAYER=bronze DATE=$(DATE)
 	$(MAKE) silver DATE=$(DATE)
+	$(MAKE) dq LAYER=silver DATE=$(DATE)
 
 verify-bronze:  ## Check Bronze partitions and contents against Postgres and the landing files
 	$(PY) scripts/verify_bronze.py

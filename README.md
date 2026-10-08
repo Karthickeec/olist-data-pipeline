@@ -3,7 +3,7 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
 
-**Status: step 4 done (Silver). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
+**Status: step 5 done (data quality). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
 
 | Source | What it simulates | Where |
 |---|---|---|
@@ -39,6 +39,7 @@ make bronze-api DATE=2017-03-01
 make silver DATE=2017-03-01       # Bronze -> Silver (also part of make daily)
 make verify-silver               # Silver vs Postgres, accounting, quarantine vs injected dirt
 make verify-silver-idempotency DATE=2017-03-04
+make dq LAYER=silver DATE=2017-03-06   # data-quality checks (also part of make daily)
 make verify-bronze            # Bronze vs Postgres and landing files
 ```
 
@@ -233,20 +234,57 @@ Verified on 2017-02-28..03-06:
 - Quarantine counts equal the dirt counted independently from the landing files.
 - Reruns of 03-02 and 03-04 leave every Silver, quarantine and pending area unchanged.
 
+## Data quality (step 5)
+
+Declarative checks per table in `config/dq/{bronze,silver}.yaml` (Gold in step 6). The engine is
+`olist_pipeline/dq/` and the CLI is `make dq LAYER=… DATE=…` (or `--start/--end` for a range in one Spark session).
+
+```yaml
+silver.orders:
+  key: [order_id]
+  checks:
+    - {type: unique, columns: [order_id], scope: table, severity: error}
+    - {type: accepted_values, column: order_status, values: [created, approved, ...], severity: error}
+    - {type: relationship, column: customer_id, ref: silver.customers.customer_id, severity: error}
+    - {type: row_count_vs_previous, min_ratio: 0.1, max_ratio: 10, severity: warn}
+```
+
+- **Check types:** `not_null`, `unique`, `accepted_values`, `range`, `schema` (expected Spark types),
+  `relationship` (left anti-join to the parent), `row_count_vs_previous` (vs the previous batch's count in
+  `dq_results`), and `expression` (any SQL predicate every row must satisfy).
+- **Scope:** `batch` (rows this batch wrote: `ingest_date` in Bronze, `_batch_date` in Silver), `table`, or `latest`
+  (the newest Bronze snapshot, for reference tables).
+- **Severity:** `error` fails the run (exit 1), and so does a check that cannot run (`error_running`, e.g. a missing column).
+  `warn` only logs. Tables can be marked `optional`.
+- **Results:** `pipeline.dq_results (batch_date, layer, table_name, check_name, severity, status, failed_rows,
+  observed, sample, message)`. `sample` holds up to 5 failing rows as JSON. A rerun replaces the batch's rows.
+- **Validation:** the YAML is checked before anything runs. Unknown check types, missing or misspelled
+  parameters, bad severities or scopes, and duplicate names are all clear errors.
+- **In `make daily`:** `dq bronze` runs after Bronze and `dq silver` after Silver.
+
+On the real data (2017-02-28..03-06), 32 Bronze and 47 Silver checks run per day. There are no blocking failures, and the warnings are genuine:
+- 7 zip prefixes whose median coordinates lie outside Brazil (one has longitude 121, in the Philippines);
+- API records missing optional fields;
+- the first daily batch after the initial load is 3% of its size.
+
+An injected bad batch (an invalid state, a duplicate order, a null customer id, an order line whose customer doesn't exist)
+produces 5 `fail` rows with samples, and the run exits 1.
+
 ## Layout
 
 ```
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
+config/dq/                data-quality suites per layer
 sql/001_schema.sql       source schema (idempotent DDL)
-sql/pipeline/            watermarks, ingest_runs, reference_snapshots, layer_runs
+sql/pipeline/            watermarks, ingest_runs, reference_snapshots, layer_runs, dq_results
 src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rules),
                          replay, customer_changes, seed, verify,
                          spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
                          api_to_bronze), api/ (activity, app, server, client),
-                         silver/ (common, clean, order_lines, job)
+                         silver/ (common, clean, order_lines, job), dq/ (suite, checks, engine)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
-                         api_to_bronze.py, silver.py, verify_bronze.py, verify_silver.py,
+                         api_to_bronze.py, silver.py, dq.py, verify_bronze.py, verify_silver.py,
                          reset_source.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

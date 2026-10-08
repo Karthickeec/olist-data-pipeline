@@ -1,0 +1,88 @@
+# Bronze checks: the data arrived in the expected shape. Content is raw by design, so
+# content problems in the CRM/API sources are warnings here and get fixed in Silver.
+defaults:
+  batch_column: ingest_date
+  scope: batch
+
+tables:
+  bronze.olist_postgres.orders:
+    key: [order_id]
+    checks:
+      - {type: schema, severity: error, columns: {order_id: string, customer_id: string, order_status: string, order_purchase_timestamp: timestamp, updated_at: timestamp, _ingested_at: timestamp, _batch_date: date, _source: string}}
+      - {type: not_null, columns: [order_id, customer_id, order_status, order_purchase_timestamp, updated_at], severity: error}
+      - {type: unique, columns: [order_id], severity: error}        # one version per key per window
+      - {type: row_count_vs_previous, min_ratio: 0.1, max_ratio: 10, severity: warn}
+
+  bronze.olist_postgres.customers:
+    key: [customer_id]
+    checks:
+      - {type: schema, severity: error, columns: {customer_id: string, customer_unique_id: string, customer_zip_code_prefix: string, updated_at: timestamp}}
+      - {type: not_null, columns: [customer_id, customer_unique_id], severity: error}
+      - {type: unique, columns: [customer_id], severity: error}
+
+  bronze.olist_postgres.order_items:
+    key: [order_id, order_item_id]
+    checks:
+      - {type: schema, severity: error, columns: {order_id: string, order_item_id: int, product_id: string, seller_id: string, price: "decimal(10,2)", freight_value: "decimal(10,2)", updated_at: timestamp}}
+      - {type: not_null, columns: [order_id, order_item_id, product_id, seller_id], severity: error}
+      - {type: unique, columns: [order_id, order_item_id], severity: error}
+      - {type: row_count_vs_previous, min_ratio: 0.1, max_ratio: 10, severity: warn}
+
+  bronze.olist_postgres.order_payments:
+    key: [order_id, payment_sequential]
+    checks:
+      - {type: schema, severity: error, columns: {order_id: string, payment_sequential: int, payment_type: string, payment_value: "decimal(10,2)", updated_at: timestamp}}
+      - {type: not_null, columns: [order_id, payment_sequential], severity: error}
+      - {type: unique, columns: [order_id, payment_sequential], severity: error}
+
+  bronze.olist_postgres.order_reviews:
+    key: [review_id, order_id]
+    checks:
+      - {type: schema, severity: error, columns: {review_id: string, order_id: string, review_score: smallint, review_creation_date: timestamp, updated_at: timestamp}}
+      - {type: not_null, columns: [review_id, order_id], severity: error}
+      - {type: unique, columns: [review_id, order_id], severity: error}
+
+  # Reference tables are snapshotted only when they change: check the newest snapshot.
+  bronze.olist_postgres.products:
+    key: [product_id]
+    scope: latest
+    checks:
+      - {type: schema, severity: error, columns: {product_id: string, product_category_name: string, product_weight_g: int}}
+      - {type: not_null, columns: [product_id], severity: error}
+      - {type: unique, columns: [product_id], severity: error}
+
+  bronze.olist_postgres.sellers:
+    key: [seller_id]
+    scope: latest
+    checks:
+      - {type: not_null, columns: [seller_id], severity: error}
+      - {type: unique, columns: [seller_id], severity: error}
+
+  bronze.olist_postgres.geolocation:
+    key: [geolocation_row_id]
+    scope: latest
+    checks:
+      - {type: schema, severity: error, columns: {geolocation_row_id: bigint, geolocation_zip_code_prefix: string, geolocation_lat: double, geolocation_lng: double}}
+      - {type: unique, columns: [geolocation_row_id], severity: error}
+
+  bronze.olist_postgres.product_category_name_translation:
+    key: [product_category_name]
+    scope: latest
+    checks:
+      - {type: unique, columns: [product_category_name], severity: error}
+
+  bronze.crm.customer_changes:
+    key: [change_id]
+    checks:
+      - {type: schema, severity: error, columns: {change_id: string, customer_unique_id: string, new_zip_code_prefix: string, new_city: string, new_state: string, requested_at: string, _corrupt_record: string, _source_file: string}}
+      - {type: not_null, name: unparseable_lines, columns: [change_id], severity: warn}
+      - {type: unique, columns: [change_id], severity: warn}          # duplicates are expected; Silver collapses them
+
+  bronze.api.customer_activity:
+    key: [customer_unique_id, activity_date]
+    optional: true                                                     # the API source starts later than the others
+    checks:
+      - {type: schema, severity: error, columns: {customer_unique_id: string, activity_date: string, sessions: string, last_seen_at: string, _page: bigint, _corrupt_record: string, _source_file: string}}
+      - {type: not_null, columns: [customer_unique_id, activity_date], severity: warn}
+      - {type: unique, columns: [customer_unique_id, activity_date], severity: error}
+      - {type: row_count_vs_previous, min_ratio: 0.2, max_ratio: 5, severity: warn}

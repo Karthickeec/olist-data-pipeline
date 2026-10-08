@@ -124,6 +124,12 @@ with every original column plus `_reason`. They're never silently dropped.
 
 ## Step 5: Data quality framework
 
+- [x] **Done.**
+  - **Real data, 2017-02-28..03-06:** 32 Bronze and 47 Silver checks per day; 0 blocking failures. Genuine warnings: 7 geolocation prefixes outside Brazil, missing optional API fields, a row-count drop after the initial load.
+  - **Injected bad batch:** 5 `fail` rows with samples, exit 1. Warn-only failures exit 0. Reruns replace their results.
+  - **Tests:** 99.
+  - **Added beyond the plan:** an `expression` check type, a `latest` scope for snapshot tables, `optional` tables, and `--start/--end` and `--suite` options.
+
 **Goal:** declarative checks, run after every layer; `error` fails the run, `warn` logs.
 
 - **Config:** `config/dq/{bronze,silver,gold}.yaml`, one block per table. Example:

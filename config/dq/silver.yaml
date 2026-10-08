@@ -1,0 +1,114 @@
+# Silver checks: typed, clean, unique and consistent across tables. Batch scope = rows
+# this batch wrote (_batch_date = D); keys are checked over the whole table.
+defaults:
+  batch_column: _batch_date
+  scope: batch
+
+tables:
+  silver.customers:
+    key: [customer_id]
+    checks:
+      - {type: unique, columns: [customer_id], scope: table, severity: error}
+      - {type: not_null, columns: [customer_id, customer_unique_id, customer_state], severity: error}
+      - type: accepted_values
+        column: customer_state
+        values: [AC, AL, AP, AM, BA, CE, DF, ES, GO, MA, MT, MS, MG, PA, PB, PR, PE, PI, RJ, RN, RS, RO, RR, SC, SP, SE, TO]
+        severity: error
+
+  silver.orders:
+    key: [order_id]
+    checks:
+      - {type: schema, severity: error, columns: {order_id: string, customer_id: string, order_status: string, order_purchase_timestamp: timestamp, order_purchase_date: date, updated_at: timestamp, _batch_date: date, _first_batch_date: date}}
+      - {type: unique, columns: [order_id], scope: table, severity: error}
+      - {type: not_null, columns: [order_id, customer_id, order_status, order_purchase_timestamp], severity: error}
+      - type: accepted_values
+        column: order_status
+        values: [created, approved, invoiced, processing, shipped, delivered, canceled, unavailable]
+        severity: error
+      - {type: expression, name: partition_matches_purchase_date, expr: "order_purchase_date = to_date(order_purchase_timestamp)", severity: error}
+      - {type: relationship, column: customer_id, ref: silver.customers.customer_id, severity: error}
+      - {type: row_count_vs_previous, min_ratio: 0.1, max_ratio: 10, severity: warn}
+
+  silver.order_items:
+    key: [order_id, order_item_id]
+    checks:
+      - {type: unique, columns: [order_id, order_item_id], scope: table, severity: error}
+      - {type: not_null, columns: [order_id, product_id, seller_id, price], severity: error}
+      - {type: range, column: price, min: 0, max: 10000, severity: warn}
+      - {type: range, column: freight_value, min: 0, max: 1000, severity: warn}
+      - {type: relationship, column: order_id, ref: silver.orders.order_id, severity: error}
+      - {type: relationship, column: product_id, ref: silver.products.product_id, severity: error}
+      - {type: relationship, column: seller_id, ref: silver.sellers.seller_id, severity: error}
+
+  silver.order_payments:
+    key: [order_id, payment_sequential]
+    checks:
+      - {type: unique, columns: [order_id, payment_sequential], scope: table, severity: error}
+      - type: accepted_values
+        column: payment_type
+        values: [credit_card, boleto, voucher, debit_card, not_defined]
+        severity: error
+      - {type: range, column: payment_value, min: 0, severity: error}
+      - {type: range, column: payment_installments, min: 0, max: 24, severity: warn}
+      - {type: relationship, column: order_id, ref: silver.orders.order_id, severity: error}
+
+  silver.order_reviews:
+    key: [review_id, order_id]
+    checks:
+      - {type: unique, columns: [review_id, order_id], scope: table, severity: error}
+      - {type: range, column: review_score, min: 1, max: 5, severity: error}
+      - {type: relationship, column: order_id, ref: silver.orders.order_id, severity: error}
+
+  silver.products:
+    key: [product_id]
+    scope: table
+    checks:
+      - {type: unique, columns: [product_id], severity: error}
+      - {type: not_null, columns: [product_id, product_category_name_english], severity: error}
+
+  silver.sellers:
+    key: [seller_id]
+    scope: table
+    checks:
+      - {type: unique, columns: [seller_id], severity: error}
+
+  silver.geolocation:
+    key: [zip_code_prefix]
+    scope: table
+    checks:
+      - {type: unique, columns: [zip_code_prefix], severity: error}
+      - {type: not_null, columns: [zip_code_prefix, lat, lng, city, state], severity: error}
+      - {type: range, column: lat, min: -34, max: 6, severity: warn}       # Brazil's bounding box
+      - {type: range, column: lng, min: -74, max: -28, severity: warn}
+
+  silver.customer_changes:
+    key: [change_id]
+    optional: true
+    checks:
+      - {type: unique, columns: [change_id], scope: table, severity: error}
+      - {type: not_null, columns: [change_id, customer_unique_id, new_city, new_state, requested_at], severity: error}
+      - type: accepted_values
+        column: new_state
+        values: [AC, AL, AP, AM, BA, CE, DF, ES, GO, MA, MT, MS, MG, PA, PB, PR, PE, PI, RJ, RN, RS, RO, RR, SC, SP, SE, TO]
+        severity: error
+      - {type: relationship, column: customer_unique_id, ref: silver.customers.customer_unique_id, severity: error}
+
+  silver.customer_activity:
+    key: [customer_unique_id, activity_date]
+    optional: true
+    checks:
+      - {type: unique, columns: [customer_unique_id, activity_date], scope: table, severity: error}
+      - {type: not_null, columns: [customer_unique_id, activity_date, sessions], severity: error}
+      - {type: range, column: sessions, min: 0, severity: error}
+      - {type: accepted_values, column: device, values: [web, android, ios], severity: error}
+      - {type: not_null, name: optional_fields_present, columns: [page_views, device, last_seen_at], severity: warn}
+      - {type: relationship, column: customer_unique_id, ref: silver.customers.customer_unique_id, severity: error}
+
+  silver.order_lines:
+    key: [order_id, order_item_id]
+    checks:
+      - {type: unique, columns: [order_id, order_item_id], scope: table, severity: error}
+      - {type: not_null, name: every_line_has_a_customer, columns: [customer_id, customer_unique_id, customer_state], severity: error}
+      - {type: not_null, columns: [product_category_name_english, seller_id, price], severity: error}
+      - {type: relationship, column: customer_id, ref: silver.customers.customer_id, severity: error}
+      - {type: expression, name: allocation_not_above_total, expr: "allocated_payment IS NULL OR allocated_payment <= payment_total", severity: error}
