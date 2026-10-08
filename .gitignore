@@ -1,0 +1,15 @@
+# Data (raw CSVs and generated landing files)
+data/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local env / editors
+.env
+.DS_Store
+.idea/
+.vscode/

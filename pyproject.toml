@@ -1,0 +1,18 @@
+[project]
+name = "olist-pipeline"
+version = "0.1.0"
+description = "Multi-source e-commerce data pipeline on the Olist dataset"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a running Postgres (skipped when it is unreachable)",
+]

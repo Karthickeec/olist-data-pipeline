@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: olist-postgres
+    environment:
+      POSTGRES_DB: ${OLIST__PG__DBNAME:-olist}
+      POSTGRES_USER: ${OLIST__PG__USER:-olist}
+      POSTGRES_PASSWORD: ${OLIST__PG__PASSWORD:-olist}
+    ports:
+      - "${OLIST__PG__PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

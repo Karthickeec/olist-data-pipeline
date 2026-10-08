@@ -1,0 +1,19 @@
+# Pipeline defaults. Any leaf can be overridden with an environment variable
+# named OLIST__<SECTION>__<KEY>, e.g. OLIST__PG__HOST=db or OLIST__PG__PORT=5433.
+# Relative paths are resolved against the repo root.
+
+pg:
+  host: localhost
+  port: 5432
+  dbname: olist
+  user: olist
+  password: olist
+  schema: olist
+
+paths:
+  raw_dir: data/raw
+  landing_dir: data/landing
+
+customer_changes:
+  rate: 0.03        # chance that each of the day's orders produces an address-change request
+  dirty_rate: 0.05  # share of requests that are deliberately malformed
