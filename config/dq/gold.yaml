@@ -1,0 +1,74 @@
+# Gold checks: keys resolve, SCD2 is consistent, aggregates and metrics are sane.
+defaults:
+  batch_column: _batch_date
+  scope: batch
+
+tables:
+  gold.dim_date:
+    key: [date_key]
+    scope: table
+    checks:
+      - {type: unique, columns: [date_key], severity: error}
+
+  gold.dim_product:
+    key: [product_sk]
+    scope: table
+    checks:
+      - {type: unique, columns: [product_sk], severity: error}
+      - {type: unique, columns: [product_id], severity: error}
+      - {type: not_null, columns: [product_category_name_english], severity: error}
+
+  gold.dim_seller:
+    key: [seller_sk]
+    scope: table
+    checks:
+      - {type: unique, columns: [seller_sk], severity: error}
+      - {type: not_null, name: seller_located, columns: [lat, lng], severity: warn}
+
+  gold.dim_customer:
+    key: [customer_sk]
+    scope: table
+    checks:
+      - {type: unique, columns: [customer_sk], severity: error}
+      - {type: unique, name: one_current_version_per_customer, columns: [customer_unique_id], where: is_current, severity: error}
+      - {type: unique, name: one_version_per_start, columns: [customer_unique_id, valid_from], severity: error}
+      - {type: expression, name: valid_from_before_valid_to, expr: "valid_from < valid_to", severity: error}
+      - {type: expression, name: current_means_open_ended, expr: "is_current = (valid_to = TIMESTAMP '9999-12-31 00:00:00')", severity: error}
+      - type: accepted_values
+        column: state
+        values: [AC, AL, AP, AM, BA, CE, DF, ES, GO, MA, MT, MS, MG, PA, PB, PR, PE, PI, RJ, RN, RS, RO, RR, SC, SP, SE, TO]
+        severity: error
+
+  gold.fact_order_lines:
+    key: [order_id, order_item_id]
+    checks:
+      - {type: unique, columns: [order_id, order_item_id], scope: table, severity: error}
+      - {type: not_null, name: every_line_has_a_customer_version, columns: [customer_sk, customer_state], severity: error}
+      - {type: not_null, columns: [product_sk, seller_sk, date_key, price], severity: error}
+      - {type: relationship, column: customer_sk, ref: gold.dim_customer.customer_sk, severity: error}
+      - {type: relationship, column: product_sk, ref: gold.dim_product.product_sk, severity: error}
+      - {type: relationship, column: seller_sk, ref: gold.dim_seller.seller_sk, severity: error}
+      - {type: relationship, column: date_key, ref: gold.dim_date.date_key, severity: error}
+      - {type: range, column: price, min: 0, severity: error}
+
+  gold.agg_daily_category_sales:
+    key: [order_purchase_date, category]
+    checks:
+      - {type: unique, columns: [order_purchase_date, category], scope: table, severity: error}
+      - {type: range, column: revenue, min: 0, severity: error}
+      - {type: expression, name: items_at_least_orders, expr: "items >= orders", severity: error}
+
+  gold.customer_metrics:
+    key: [customer_unique_id]
+    checks:
+      - {type: unique, columns: [customer_unique_id], severity: error}
+      - {type: range, column: lifetime_value, min: 0, severity: error}
+      - {type: range, column: r_score, min: 1, max: 5, severity: error}
+      - {type: range, column: f_score, min: 1, max: 5, severity: error}
+      - {type: range, column: m_score, min: 1, max: 5, severity: error}
+      - {type: range, column: days_since_last_order, min: 0, severity: error}
+      - type: accepted_values
+        column: rfm_segment
+        values: [Champions, Loyal, Potential, At risk, Hibernating, Lost]
+        severity: error
+      - {type: row_count_vs_previous, min_ratio: 0.9, max_ratio: 2, severity: warn}

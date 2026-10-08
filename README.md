@@ -3,7 +3,7 @@
 A multi-source batch pipeline on the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 Target stack: Python, PySpark, PostgreSQL, FastAPI, Airflow, AWS S3/EMR/Athena, Parquet, Bronze/Silver/Gold layers.
 
-**Status: step 5 done (data quality). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
+**Status: step 6 done (Gold + salting demo). Plan for the remaining steps: [docs/PLAN.md](docs/PLAN.md).**
 
 | Source | What it simulates | Where |
 |---|---|---|
@@ -40,6 +40,9 @@ make silver DATE=2017-03-01       # Bronze -> Silver (also part of make daily)
 make verify-silver               # Silver vs Postgres, accounting, quarantine vs injected dirt
 make verify-silver-idempotency DATE=2017-03-04
 make dq LAYER=silver DATE=2017-03-06   # data-quality checks (also part of make daily)
+make gold DATE=2017-12-31         # Silver -> Gold (star schema, metrics)
+make verify-gold DATE=2017-12-31  # totals, SCD2 invariants, LTV
+make salting-demo                 # skew experiment -> docs/SALTING.md
 make verify-bronze            # Bronze vs Postgres and landing files
 ```
 
@@ -270,9 +273,85 @@ On the real data (2017-02-28..03-06), 32 Bronze and 47 Silver checks run per day
 An injected bad batch (an invalid state, a duplicate order, a null customer id, an order line whose customer doesn't exist)
 produces 5 `fail` rows with samples, and the run exits 1.
 
+## Gold (step 6)
+
+### Building up history (catch-up)
+
+The local source was at 2017-03-06, so I caught it up to 2017-12-31 in one go before building Gold. This is a
+catch-up run: Postgres → Bronze is **one** batch whose watermark window covers the whole gap, while the CRM files and
+the API are ingested per day (one Spark session each, `--start/--end`). Wall time for 300 days, about 5 minutes:
+
+| Part | Time | Volume |
+|---|---|---|
+| Replay 2017-03-07..12-31 into Postgres | 14 s | 42,017 new orders |
+| `postgres_to_bronze` (one catch-up window) | 10 s | 42,926 orders, 47,407 items |
+| `files_to_bronze` (300 partitions) | 55 s | 1,235 change requests |
+| `api_to_bronze` (300 days) | 113 s | 485 pages, 66,815 records, 30 retries (15×429, 15×500), 21 s waiting |
+| DQ Bronze | 13 s | 32 checks |
+| Silver (one batch over all new partitions) | 77 s | 45,430 orders, 51,234 order lines |
+| DQ Silver | 23 s | 47 checks |
+
+Trade-off: the catch-up batch keeps only each order's latest state, not the daily states in between.
+
+### Star schema (`<lake>/gold/`)
+
+| Table | Grain | Rows (to 2017-12-31) |
+|---|---|---|
+| `fact_order_lines` | order item, partitioned by purchase date | 51,234 |
+| `dim_customer` | SCD Type 2 version of a `customer_unique_id` | 45,255 versions, 44,034 customers |
+| `dim_product`, `dim_seller`, `dim_date` | product / seller / day | 32,951 / 3,095 / 1,096 |
+| `agg_daily_category_sales` | day × English category, sales only (no canceled/unavailable) | 10,027 |
+| `customer_metrics` | customer, snapshot per `as_of_date` | 43,316 |
+
+- **Surrogate keys** are 64-bit hashes of the natural key (plus `valid_from` for SCD2 versions), so rebuilding a
+  dimension never changes the keys facts point to.
+- **`dim_customer` (SCD2):**
+  - Version 1 is the address on the customer's first order.
+  - Each clean CRM address change opens a new version at `requested_at` and closes the previous one; requests that keep the same address are skipped.
+  - `valid_to` is exclusive and current rows end at 9999-12-31.
+  - 1,200 customers have more than one version.
+  - The fact's `customer_sk` (and `customer_state`) is the version valid at purchase time: a broadcast range join.
+- **`customer_metrics`:** lifetime value (allocated payments), order count, average order value, days since the last order, and RFM.
+  - Recency and monetary scores are quintiles (`ntile(5)`).
+  - Frequency uses fixed bands (1, 2, 3, 4–5, 6+), because 97% of customers ordered once.
+  - Segments, first match wins:
+    - **Champions:** R≥4, F≥2, M≥4.
+    - **Loyal:** R≥2, F≥2.
+    - **Potential:** R≥4.
+    - **At risk:** R≥2, M≥4.
+    - **Hibernating:** R≥2.
+    - **Lost:** everyone else.
+  - As of 2017-12-31: Champions 416, Loyal 642, Potential 16,790, At risk 6,368, Hibernating 10,436, Lost 8,664.
+- **Incremental:** dimensions are rebuilt in full (small, deterministic); the fact and the daily aggregate rebuild only the
+  purchase-date partitions Silver batch D rewrote; `customer_metrics` writes the `as_of_date=D` snapshot.
+- **DQ** (`config/dq/gold.yaml`, 31 checks) covers:
+  - every fact key resolving to its dimension;
+  - one current version per customer;
+  - `valid_from < valid_to`, and current rows being open-ended;
+  - the RFM ranges and segment values.
+
+  One genuine warning: 7 sellers whose zip prefix isn't in the geolocation data.
+
+Verified (`make verify-gold DATE=2017-12-31`):
+- the fact equals Silver order_lines (51,234 lines, R$6,205,592.90 in item prices);
+- the daily aggregate equals the fact's sales;
+- SCD2 has no gaps or overlaps;
+- all 51,234 fact rows point to the version valid at purchase;
+- LTV equals the fact payments for all 43,316 customers (R$7,143,826.57 in total);
+- a Gold rerun leaves all 7 tables unchanged.
+
+### Salting demo
+
+[`docs/SALTING.md`](docs/SALTING.md) measures skew on `customer_state` (SP is 39% of rows) over 5.1M rows.
+- **Sum/count:** salting is pointless. Partial aggregation means at most 82 rows reach any post-shuffle task.
+- **Sort-merge join on state:** the busiest task reads 2.51M rows. Salting cuts it to 994k rows (and its time about in half).
+- **AQE's skew-join handling** splits it with no code change: 25 tasks, the busiest at 522k rows.
+- **Gotcha:** AQE only does this when *both* join sides are shuffled. My first attempt used a small side that was already hash-partitioned on the key, and AQE silently did nothing.
+
 ## Layout
 
 ```
+docs/                    PLAN.md, SALTING.md
 config/pipeline.yaml     defaults (env overrides: OLIST__SECTION__KEY)
 config/dq/                data-quality suites per layer
 sql/001_schema.sql       source schema (idempotent DDL)
@@ -281,10 +360,12 @@ src/olist_pipeline/      config, db, sources (CSV specs), replay_logic (pure rul
                          replay, customer_changes, seed, verify,
                          spark, lake, watermarks, bronze/ (postgres_to_bronze, files_to_bronze,
                          api_to_bronze), api/ (activity, app, server, client),
-                         silver/ (common, clean, order_lines, job), dq/ (suite, checks, engine)
+                         silver/ (common, clean, order_lines, job), dq/ (suite, checks, engine),
+                         gold/ (model, job)
 scripts/                 seed_reference.py, replay.py, verify_replay.py, install_java.sh,
                          spark_smoke.py, postgres_to_bronze.py, files_to_bronze.py,
-                         api_to_bronze.py, silver.py, dq.py, verify_bronze.py, verify_silver.py,
+                         api_to_bronze.py, silver.py, gold.py, dq.py, salting_demo.py,
+                         verify_bronze.py, verify_silver.py, verify_gold.py,
                          reset_source.py
 tests/                   unit tests (incl. Spark); tests/integration needs Postgres
 ```

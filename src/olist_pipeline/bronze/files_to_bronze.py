@@ -9,7 +9,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType
 
-from olist_pipeline.bronze import TableResult, parse_batch_date, utc_now
+from olist_pipeline.bronze import TableResult, parse_batch_dates, utc_now
 from olist_pipeline.config import load_config
 from olist_pipeline.customer_changes import partition_dir
 from olist_pipeline.lake import table_path, write_partition
@@ -41,11 +41,12 @@ def ingest_customer_changes(spark: SparkSession, cfg: dict, batch_date: date,
 
 
 def main(argv=None) -> None:
-    batch_date = parse_batch_date(argv, "Ingest the day's CRM address-change files into Bronze.")
+    days = parse_batch_dates(argv, "Ingest the CRM address-change files into Bronze (one partition per day).")
     cfg = load_config()
     spark = build_spark(cfg, "files_to_bronze")
     try:
-        print(ingest_customer_changes(spark, cfg, batch_date, utc_now()), flush=True)
+        for day in days:
+            print(ingest_customer_changes(spark, cfg, day, utc_now()), flush=True)
     finally:
         spark.stop()
 

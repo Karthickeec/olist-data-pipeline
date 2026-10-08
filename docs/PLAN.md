@@ -166,6 +166,16 @@ missing column → clear error); the exit-code behaviour; the dq_results upsert 
 
 ## Step 6: Gold (star schema) + salting demo
 
+- [x] **Done.**
+  - **Catch-up to 2017-12-31 in ~5 min:** replay 14 s, Postgres→Bronze 10 s, files 55 s, API 113 s (485 pages, 30 retries), DQ Bronze 13 s, Silver 77 s, DQ Silver 23 s.
+  - **Gold rows:** fact 51,234 lines; dim_customer 45,255 versions for 44,034 customers (1,200 with history); customer_metrics 43,316.
+  - **Verified:** fact = Silver; aggregate = fact; SCD2 has no gaps or overlaps; every fact row is on the version valid at purchase; LTV equals fact payments (R$7,143,826.57); Gold DQ passes (31 checks); a Gold rerun is identical.
+  - **Salting:** the plain join's busiest task read 2.51M rows; salting cut it to 994k, and AQE skew-join to 522k across 25 tasks.
+  - **Tests:** 105.
+  - **Changed from the plan:**
+    - The salting demo uses a skewed sort-merge join instead of median and count-distinct. An exact median can't be salted, count-distinct is already shuffled by (state, customer), and Spark 3.5 pre-limits `row_number() <= N` windows.
+    - Dimensions are rebuilt in full each batch instead of only for the customers touched (simpler, deterministic, and cheap at this size).
+
 **6.0: build up history first (catch-up).**
 1. Add `--start/--end` to `files_to_bronze` and `api_to_bronze`: one Spark session, one partition per day.
 2. Replay 2017-03-07..2017-12-31 into Postgres (≈300 days).

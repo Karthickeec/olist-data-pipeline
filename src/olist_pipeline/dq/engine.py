@@ -71,6 +71,8 @@ class Runner:
         col = self.suite.batch_column
         day = F.lit(self.batch_date.isoformat()).cast("date")
         if col not in df.columns:
+            if scope == "table":            # e.g. dimensions rebuilt whole: no batch column
+                return df
             raise C.ColumnMissing(f"batch column {col!r} not in table")
         if scope == "batch":
             return df.filter(F.col(col) == day)

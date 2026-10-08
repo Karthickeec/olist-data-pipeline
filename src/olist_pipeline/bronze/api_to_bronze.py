@@ -17,7 +17,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType
 
 from olist_pipeline.api.client import ActivityClient, FetchStats, land_pages, landing_dir_for
-from olist_pipeline.bronze import TableResult, parse_batch_date, utc_now
+from olist_pipeline.bronze import TableResult, parse_batch_dates, utc_now
 from olist_pipeline.config import load_config
 from olist_pipeline.lake import table_path, write_partition
 from olist_pipeline.spark import build_spark
@@ -76,21 +76,31 @@ def load_to_bronze(spark: SparkSession, cfg: dict, batch_date: date, ingested_at
 
 
 def main(argv=None) -> None:
-    batch_date = parse_batch_date(argv, "Fetch the customer-activity API for one date into Bronze.")
+    days = parse_batch_dates(argv, "Fetch the customer-activity API into Bronze (one partition per day).")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     cfg = load_config()
-    client = make_client(cfg)
-    with client.http:
-        stats = fetch_and_land(client, cfg, batch_date)
+    # Fetch and land every day first (no Spark needed), then load them in one Spark session.
+    stats = {}
+    for day in days:
+        client = make_client(cfg)
+        with client.http:
+            stats[day] = fetch_and_land(client, cfg, day)
 
     spark = build_spark(cfg, "api_to_bronze")
     try:
-        result = load_to_bronze(spark, cfg, batch_date, utc_now())
+        for day in days:
+            result = load_to_bronze(spark, cfg, day, utc_now())
+            s = stats[day]
+            print(result, flush=True)
+            print(f"api_to_bronze {day}: pages={s.pages} records={s.records} retries={s.retries} "
+                  f"total_wait={s.wait_seconds:.1f}s bronze_rows={result.rows}", flush=True)
     finally:
         spark.stop()
-    print(result, flush=True)
-    print(f"api_to_bronze {batch_date}: pages={stats.pages} records={stats.records} "
-          f"retries={stats.retries} total_wait={stats.wait_seconds:.1f}s bronze_rows={result.rows}", flush=True)
+    if len(days) > 1:
+        print(f"api_to_bronze {days[0]}..{days[-1]}: {len(days)} days, "
+              f"pages={sum(s.pages for s in stats.values())} records={sum(s.records for s in stats.values())} "
+              f"retries={sum(s.retries for s in stats.values())} "
+              f"total_wait={sum(s.wait_seconds for s in stats.values()):.1f}s", flush=True)
 
 
 if __name__ == "__main__":

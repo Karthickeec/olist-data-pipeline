@@ -1,5 +1,12 @@
+import os
 import shutil
+import time
 from pathlib import Path
+
+# PySpark converts timestamps between Spark (UTC session) and Python using the *process* time zone.
+# Pin it to UTC so values created in and collected from tests match what Spark stores.
+os.environ["TZ"] = "UTC"
+time.tzset()
 
 import pytest
 

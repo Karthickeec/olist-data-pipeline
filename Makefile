@@ -7,7 +7,7 @@ OLIST_API_KEY ?= dev-local-key
 export OLIST_API_KEY
 
 .PHONY: help venv java up down psql seed replay replay-range replay-all verify verify-idempotency \
-        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh dq daily verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
+        spark-smoke bronze bronze-postgres bronze-files bronze-api api api-health silver silver-full-refresh gold gold-full-refresh dq daily verify-gold verify-gold-idempotency salting-demo verify-bronze verify-silver verify-silver-idempotency test test-unit reset-source reset
 
 help:  ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
@@ -52,8 +52,8 @@ spark-smoke:  ## Check Spark: Java, Parquet round trip, JDBC read
 bronze-postgres:  ## Postgres -> Bronze for one batch date: make bronze-postgres DATE=2017-03-01
 	$(PY) scripts/postgres_to_bronze.py --date $(DATE)
 
-bronze-files:  ## Landing files -> Bronze for one batch date: make bronze-files DATE=2017-03-01
-	$(PY) scripts/files_to_bronze.py --date $(DATE)
+bronze-files:  ## Landing files -> Bronze: make bronze-files DATE=2017-03-01 (or START=.. END=..)
+	$(PY) scripts/files_to_bronze.py $(if $(START),--start $(START) --end $(END),--date $(DATE))
 
 bronze: bronze-postgres bronze-files  ## Both Bronze jobs: make bronze DATE=2017-03-01
 
@@ -65,8 +65,8 @@ api-health:  ## Fail unless the mock API is up
 	@curl -fsS http://$(API_HOST):$(API_PORT)/healthz >/dev/null 2>&1 || \
 		{ echo "Customer-activity API is not running: start it with 'make api' in another terminal."; exit 1; }
 
-bronze-api:  ## API -> landing -> Bronze for one batch date: make bronze-api DATE=2017-03-01
-	$(PY) scripts/api_to_bronze.py --date $(DATE)
+bronze-api:  ## API -> landing -> Bronze: make bronze-api DATE=2017-03-01 (or START=.. END=..)
+	$(PY) scripts/api_to_bronze.py $(if $(START),--start $(START) --end $(END),--date $(DATE))
 
 silver:  ## Bronze -> Silver for one batch date: make silver DATE=2017-03-01
 	$(PY) scripts/silver.py --date $(DATE)
@@ -74,16 +74,24 @@ silver:  ## Bronze -> Silver for one batch date: make silver DATE=2017-03-01
 silver-full-refresh:  ## Rebuild every Silver table from all Bronze up to DATE
 	$(PY) scripts/silver.py --date $(DATE) --full-refresh
 
+gold:  ## Silver -> Gold for one batch date: make gold DATE=2017-12-31
+	$(PY) scripts/gold.py --date $(DATE)
+
+gold-full-refresh:  ## Rebuild every Gold fact partition from Silver
+	$(PY) scripts/gold.py --date $(DATE) --full-refresh
+
 dq:  ## Data-quality checks for a layer: make dq LAYER=silver DATE=2017-03-01 (exit 1 on errors)
 	$(PY) scripts/dq.py --layer $(LAYER) --date $(DATE)
 
-daily: api-health  ## One simulated day: replay, Bronze (Postgres, files, API), DQ, Silver, DQ
+daily: api-health  ## One simulated day: replay, Bronze (Postgres, files, API), Silver, Gold, DQ after each
 	$(MAKE) replay DATE=$(DATE)
 	$(MAKE) bronze DATE=$(DATE)
 	$(MAKE) bronze-api DATE=$(DATE)
 	$(MAKE) dq LAYER=bronze DATE=$(DATE)
 	$(MAKE) silver DATE=$(DATE)
 	$(MAKE) dq LAYER=silver DATE=$(DATE)
+	$(MAKE) gold DATE=$(DATE)
+	$(MAKE) dq LAYER=gold DATE=$(DATE)
 
 verify-bronze:  ## Check Bronze partitions and contents against Postgres and the landing files
 	$(PY) scripts/verify_bronze.py
@@ -93,6 +101,15 @@ verify-silver:  ## Check Silver vs Postgres, row accounting and quarantine vs in
 
 verify-silver-idempotency:  ## Rerun Silver for DATE and check nothing changes: make verify-silver-idempotency DATE=...
 	$(PY) scripts/verify_silver.py idempotency --date $(DATE)
+
+verify-gold:  ## Check Gold totals, SCD2 invariants, fact-to-version mapping and LTV: make verify-gold DATE=...
+	$(PY) scripts/verify_gold.py full --date $(DATE)
+
+verify-gold-idempotency:  ## Rerun Gold for DATE and check nothing changes
+	$(PY) scripts/verify_gold.py idempotency --date $(DATE)
+
+salting-demo:  ## Skewed aggregation by customer_state with and without salting -> docs/SALTING.md
+	$(PY) scripts/salting_demo.py
 
 test:  ## All tests (integration tests skip if Postgres is down)
 	$(PY) -m pytest -q

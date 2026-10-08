@@ -21,8 +21,12 @@ FIRST_SEEN = "_first_seen_batch"
 FIRST_BATCH = "_first_batch_date"
 
 
+def layer_dir(root: str, layer: str, table: str) -> str:
+    return f"{root}/{layer}/{table}"
+
+
 def silver_dir(root: str, table: str) -> str:
-    return f"{root}/silver/{table}"
+    return layer_dir(root, "silver", table)
 
 
 def quarantine_dir(root: str, table: str) -> str:
@@ -33,8 +37,8 @@ def pending_dir(root: str, table: str) -> str:
     return f"{root}/silver/_pending/{table}"
 
 
-def staging_dir(root: str, table: str) -> str:
-    return f"{root}/silver/_staging/{table}"
+def staging_dir(root: str, table: str, layer: str = "silver") -> str:
+    return f"{root}/{layer}/_staging/{table}"
 
 
 def read_bronze(spark: SparkSession, path: str, low: date | None, high: date) -> DataFrame | None:
@@ -94,14 +98,14 @@ class MergeResult:
 
 def merge_into(spark: SparkSession, new: DataFrame, root: str, table: str, key: list[str],
                order: list[Column], partition_col: str | None = None,
-               full_refresh: bool = False, union_existing: bool = True) -> MergeResult:
-    """Merge `new` into silver/<table>: latest row per key, idempotent, partition-scoped.
+               full_refresh: bool = False, union_existing: bool = True, layer: str = "silver") -> MergeResult:
+    """Merge `new` into <layer>/<table>: latest row per key, idempotent, partition-scoped.
 
     `new` must have the table's full Silver schema. With full_refresh the existing table
     is ignored and replaced entirely. With union_existing=False the touched partitions are
     replaced by `new` alone (for tables recomputed whole partitions at a time).
     """
-    target, staging = silver_dir(root, table), staging_dir(root, table)
+    target, staging = layer_dir(root, layer, table), staging_dir(root, table, layer)
     exists = path_exists(spark, target) and not full_refresh and union_existing
     if partition_col:
         parts = sorted(r[0] for r in new.select(partition_col).distinct().collect())
