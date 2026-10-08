@@ -17,6 +17,8 @@ def load_config(path: Path = DEFAULT_CONFIG, environ: Mapping[str, str] = os.env
         cfg = yaml.safe_load(f)
     _apply_env(cfg, environ, ENV_PREFIX)
     cfg["paths"] = {k: _resolve(v) for k, v in cfg["paths"].items()}
+    cfg["lake"]["root"] = resolve_uri(cfg["lake"]["root"])
+    cfg["spark"]["java_home"] = str(Path(cfg["spark"]["java_home"]).expanduser())
     return cfg
 
 
@@ -45,3 +47,9 @@ def _coerce(raw: str, default):
 def _resolve(p: str) -> Path:
     path = Path(p)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def resolve_uri(root: str) -> str:
+    """Keep URIs (s3://...) as-is; make local paths absolute. No trailing slash."""
+    root = root.rstrip("/")
+    return root if "://" in root else str(_resolve(root))

@@ -9,6 +9,7 @@ pg:
   user: olist
   password: olist
   schema: olist
+  pipeline_schema: pipeline  # watermarks and ingest bookkeeping
 
 paths:
   raw_dir: data/raw
@@ -17,3 +18,14 @@ paths:
 customer_changes:
   rate: 0.03        # chance that each of the day's orders produces an address-change request
   dirty_rate: 0.05  # share of requests that are deliberately malformed
+
+lake:
+  root: data/lake  # local path (relative to repo root) or a URI such as s3://bucket/prefix
+
+spark:
+  master: local[2]
+  driver_memory: 2g
+  shuffle_partitions: 4
+  java_home: ~/.local/share/jdk-17/Contents/Home  # installed by scripts/install_java.sh
+  jdbc_package: org.postgresql:postgresql:42.7.7
+  jdbc_fetchsize: 10000
